@@ -1,0 +1,28 @@
+name = "dspeak-media-control"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "MEDIA_ROOM_DO"
+class_name = "MediaRoomDO"
+
+[[durable_objects.bindings]]
+name = "PROVIDER_REGISTRY_DO"
+class_name = "ProviderRegistryDO"
+
+[vars]
+MEDIA_CONTROL_ISSUER = "dspeak-media-control"
+PROVIDER_TICKET_TTL_SECONDS = "120"
+
+[exports.MediaRoomDO]
+type = "durable-object"
+storage = "sqlite"
+
+[exports.ProviderRegistryDO]
+type = "durable-object"
+storage = "sqlite"
+
+# Secrets (set via `wrangler secret put`)
+# MEDIA_TICKET_PUBLIC_KEY        Ed25519 public key — verifies media tickets signed by dspeak/Vercel
+# PROVIDER_TICKET_PRIVATE_KEY    Ed25519 private key — signs provider tickets for dspeak-sfu

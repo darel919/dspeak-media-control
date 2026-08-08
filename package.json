@@ -1,0 +1,27 @@
+{
+  "name": "dspeak-media-control",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker + Durable Object media control plane for dSpeak",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test tests/*.test.js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260808.1",
+    "prettier": "^3.9.6",
+    "wrangler": "^4.120.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

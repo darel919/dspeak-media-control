@@ -1,0 +1,5 @@
+node_modules
+.hermes
+.env
+.dev.vars
+.wrangler

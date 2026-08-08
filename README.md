@@ -1,0 +1,158 @@
+# dspeak-media-control
+
+Cloudflare Worker + Durable Object media control plane for dSpeak.
+
+## What this is
+
+Runs on Cloudflare Workers. One Worker entrypoint + two Durable Objects:
+
+- **MediaRoomDO** — one per live media channel. Owns topology, route epochs, P2P signaling relay, provider transitions.
+- **ProviderRegistryDO** — provider registry + circuit breakers + route selection.
+- **Worker (Hono)** — HTTP endpoints, WebSocket upgrade to the per-channel DO.
+
+The main dSpeak app (`dspeak`) calls `POST /api/media/bootstrap` on its own
+server, which signs a short-lived media ticket and returns the WebSocket URL
+
+- ticket. This Worker/DO verifies that ticket and admits the client to the
+  channel control plane. The DO also mints provider tickets for `dspeak-sfu`.
+
+## Architecture / flow
+
+```
+[Client] --WS /media-control/:channelId + signed ticket--> [Worker] --upgrade--> [MediaRoomDO(channelId)]
+[dspeak app] --POST /api/media/bootstrap--> (signs media ticket with its own private key)
+
+MediaRoomDO            ProviderRegistryDO
+  ├─ verify media ticket (Ed25519 public key)
+  ├─ route selection via ProviderRegistryDO
+  ├─ commit route epoch, broadcast topology
+  └─ mint provider tickets for dspeak-sfu (own private key)
+```
+
+## Prerequisites
+
+- Node.js >= 18
+- Cloudflare account, logged in via `wrangler login`
+- The two Durable Object classes are registered in `wrangler.toml` (already done)
+
+## Configure
+
+1. Generate the two Ed25519 keypairs (see below).
+2. Set variables/secrets.
+3. Deploy.
+
+### Key generation
+
+```bash
+# 1. Media ticket keypair — main app (Vercel) keeps PRIVATE, this worker gets PUBLIC
+openssl genpkey -algorithm Ed25519 -out media-ticket-private.pem
+openssl pkey -in media-ticket-private.pem -pubout -out media-ticket-public.pem
+base64 -i media-ticket-public.pem       # -> MEDIA_TICKET_PUBLIC_KEY
+# put media-ticket-private.pem on the dspeak (Vercel) side, never here
+
+# 2. Provider ticket keypair — this worker signs, dspeak-sfu verifies
+openssl genpkey -algorithm Ed25519 -out provider-ticket-private.pem
+openssl pkey -in provider-ticket-private.pem -pubout -out provider-ticket-public.pem
+base64 -i provider-ticket-public.pem    # -> share with dspeak-sfu
+```
+
+> `base64 -i` is macOS syntax (`-w 0` is GNU). The `.env.example` shows the
+> same values; `tickets.js` strips whitespace either way.
+
+### Environment variables
+
+All vars can live in `wrangler.toml` (`[vars]`) or as secrets. Secrets never
+go in the file — set them with `wrangler secret put`:
+
+| Variable                      | Type   | Purpose                                                          |
+| ----------------------------- | ------ | ---------------------------------------------------------------- |
+| `MEDIA_TICKET_PUBLIC_KEY`     | secret | Ed25519 public key used to verify media tickets signed by dspeak |
+| `PROVIDER_TICKET_PRIVATE_KEY` | secret | Ed25519 private key used to sign provider tickets for dspeak-sfu |
+| `PROVIDER_TICKET_PUBLIC_KEY`  | secret | Ed25519 public key shared with dspeak-sfu for verification       |
+| `MEDIA_CONTROL_ISSUER`        | var    | issuer claim, default `dspeak-media-control`                     |
+| `MEDIA_TICKET_TTL_SECONDS`    | var    | media ticket lifetime, `120`                                     |
+| `PROVIDER_TICKET_TTL_SECONDS` | var    | provider ticket lifetime, `120`                                  |
+
+For local dev, crate a `.dev.vars` file (gitignored) with the same keys:
+
+```bash
+cp .env.example .dev.vars
+# edit .dev.vars with real values
+```
+
+### Wrangler secrets
+
+```bash
+wrangler secret put MEDIA_TICKET_PUBLIC_KEY
+wrangler secret put PROVIDER_TICKET_PRIVATE_KEY
+wrangler secret put PROVIDER_TICKET_PUBLIC_KEY
+```
+
+## Run locally
+
+```bash
+npm install
+npm run dev        # wrangler dev — starts at http://localhost:8787
+```
+
+If you only have the public key but no private key locally, the worker still
+boots but media ticket verification will fail until `MEDIA_TICKET_PUBLIC_KEY`
+is set — that's expected.
+
+## Deploy
+
+```bash
+npm run deploy     # wrangler deploy
+```
+
+After deploying, set secrets again (each environment needs them):
+
+```bash
+wrangler secret put MEDIA_TICKET_PUBLIC_KEY --env production
+# etc.
+warning: wrangler secret put with --env requires `wrangler.toml` env config
+```
+
+## Endpoints / protocol
+
+| Endpoint                       | Purpose                             |
+| ------------------------------ | ----------------------------------- |
+| `GET /healthz`                 | Worker liveness                     |
+| `WS /media-control/:channelId` | Upgrade to `MediaRoomDO(channelId)` |
+| `POST /media-bootstrap`        | (removed — see below)               |
+
+### WebSocket protocol
+
+Client connects to `WS /media-control/:channelId` and must send a valid media
+ticket first (see `src/protocol.js` for message constants / route model).
+
+Protocol version: **919** — hello handshake family (`hello919`, `hi919`), same
+as the media signaling protocol in the main app.
+
+## Tests
+
+```bash
+npm run test        # node --test
+npm run format      # prettier --write
+npm run format:check
+```
+
+## Repo layout
+
+```
+src/
+  index.ts              Worker entry (Hono)
+  protocol.js           shared protocol constants + route helpers
+  tickets.js            media ticket verify + provider ticket sign
+  MediaRoomDO.ts        per-channel media authority
+  ProviderRegistryDO.ts provider registry + circuit breakers
+tests/                  node --test suite
+wrangler.toml           bindings + var defaults
+.env.example            variable reference
+docs/architecture.md    extended architecture notes
+```
+
+## Related projects
+
+- `dspeak` (Nuxt/Vercel): signs media tickets, calls `POST /api/media/bootstrap`.
+- `dspeak-sfu` (self-hosted mediasoup): verifies provider tickets locally; no auth coupling.
