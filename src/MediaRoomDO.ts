@@ -9,161 +9,310 @@ import {
   SFU_PROVIDER,
   CONTROL_HEARTBEAT_INTERVAL_MS,
   CONTROL_HEARTBEAT_TIMEOUT_MS,
+  MEDIA_PROVIDER_PROTOCOL_REVISION,
   createLocalRoute,
   createP2PRoute,
   createSFURoute,
   validateRouteForMode,
   compareRouteEpoch,
 } from "./protocol.js";
+import { verifyMediaTicket } from "./tickets.js";
+
+const P2P_QUALIFICATION_STABILITY_MS = 2_000;
 
 export class MediaRoomDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Map(); // ws -> { userId, deviceId, peerId, authenticated, lastHeartbeat }
-    this.participants = new Map(); // userId -> { deviceId, peerId, ws, sources, joinedAt }
+    this.channelId = null;
+    this.sessions = new Map();
+    this.participants = new Map();
     this.route = createLocalRoute(0, 0, "waiting-for-peer");
     this.pendingRoute = null;
-    this.qualificationState = new Map(); // peerId -> { qualifiedPeers: Set, ready: boolean }
-    this.providerHealth = new Map(); // providerId -> { healthy: boolean, lastCheck, failures }
+    this.pendingStartedAt = 0;
+    this.qualificationState = new Map();
+    this.providerReadiness = new Set();
+    this.transitionReadiness = new Set();
+    this.publishedSources = new Map();
+    this.providerHealth = new Map();
     this.sourceRevision = 0;
     this.epoch = 0;
     this.transitionGeneration = 0;
+    this.transitionInFlight = false;
+    this.qualifiedParticipantSignature = null;
+    this.qualificationStartedAt = 0;
     this.controlLeaseTimer = null;
+    this.stateLoaded = false;
   }
 
   async fetch(request) {
     const url = new URL(request.url);
+    const forwardedChannelId = request.headers.get("X-dSpeak-Channel-Id");
+    if (forwardedChannelId) this.channelId ||= forwardedChannelId;
+    await this.loadDurableState();
 
     if (request.headers.get("Upgrade") === "websocket") {
       const [client, server] = Object.values(new WebSocketPair());
-      this.handleWebSocket(server, request);
+      this.handleWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (!this.isAdminRequest(request))
+      return new Response("Unauthorized", { status: 401 });
+    if (url.pathname.endsWith("/participants") && request.method === "GET")
+      return Response.json({ participants: this.getParticipantList() });
+    if (url.pathname.endsWith("/moderate") && request.method === "POST") {
+      const data = await request.json();
+      const matches = [...this.participants.values()].filter(
+        (participant) => participant.userId === String(data.userId || ""),
+      );
+      for (const participant of matches) {
+        if (!participant.ws) continue;
+        this.sendMessage(participant.ws, "voice-moderation", {
+          action: data.targetChannelId ? "move" : "disconnect",
+          targetChannelId: data.targetChannelId || null,
+        });
+        participant.ws.close(4001, "Voice moderation");
+      }
+      return Response.json({ affected: matches.length });
     }
 
     return new Response("WebSocket upgrade required", { status: 426 });
   }
 
-  handleWebSocket(ws, request) {
-    ws.accept();
+  isAdminRequest(request) {
+    const expected = this.env.MEDIA_CONTROL_ADMIN_TOKEN;
+    return Boolean(
+      expected && request.headers.get("authorization") === `Bearer ${expected}`,
+    );
+  }
 
+  handleWebSocket(ws) {
     const session = {
       authenticated: false,
       userId: null,
       deviceId: null,
       peerId: crypto.randomUUID(),
       lastHeartbeat: Date.now(),
+      mediaSessionId: crypto.randomUUID(),
+      providerCapabilities: [
+        SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        SFU_PROVIDER.MEDIASOUP,
+      ],
+      sources: [],
+      joinedAt: Date.now(),
     };
 
+    this.state.acceptWebSocket(ws);
+    ws.serializeAttachment(session);
     this.sessions.set(ws, session);
-    this.startControlLeaseTimer();
-
-    ws.addEventListener("message", async (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        await this.handleMessage(ws, session, data);
-      } catch (error) {
-        console.error("[MediaRoomDO] Message parse error:", error);
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.ERROR,
-            error: "Invalid message",
-          }),
-        );
-      }
-    });
-
-    ws.addEventListener("close", () => {
-      this.handleDisconnect(ws, session);
-    });
+    void this.state.storage.setAlarm?.(
+      Date.now() + CONTROL_HEARTBEAT_INTERVAL_MS,
+    );
+    ws.send(
+      JSON.stringify({
+        type: MEDIA_CONTROL_SERVER_HELLO,
+        data: {
+          protocolVersion: MEDIA_CONTROL_PROTOCOL_VERSION,
+          contractRevision: 2,
+          mediaSessionId: session.mediaSessionId,
+          heartbeatIntervalMs: CONTROL_HEARTBEAT_INTERVAL_MS,
+          heartbeatTimeoutMs: CONTROL_HEARTBEAT_TIMEOUT_MS,
+          serverTime: Date.now(),
+        },
+      }),
+    );
   }
 
-  async handleMessage(ws, session, data) {
+  async webSocketMessage(ws, message) {
+    await this.loadDurableState();
+    const session = this.getSession(ws);
+    try {
+      const data = JSON.parse(
+        typeof message === "string"
+          ? message
+          : new TextDecoder().decode(message),
+      );
+      await this.handleMessage(ws, session, data);
+    } catch (error) {
+      console.error("[MediaRoomDO] Message parse error:", error);
+      this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+        error: "Invalid message",
+      });
+    }
+  }
+
+  webSocketClose(ws) {
+    const session = this.getSession(ws);
+    if (session) this.handleDisconnect(ws, session);
+  }
+
+  webSocketError(ws) {
+    const session = this.getSession(ws);
+    if (session) this.handleDisconnect(ws, session);
+  }
+
+  async alarm() {
+    await this.loadDurableState();
+    const sockets = this.state.getWebSockets?.() || [...this.sessions.keys()];
+    const now = Date.now();
+    for (const ws of sockets) {
+      const session = this.getSession(ws);
+      if (
+        session?.authenticated &&
+        now - session.lastHeartbeat > CONTROL_HEARTBEAT_TIMEOUT_MS
+      )
+        ws.close(1008, "Control lease expired");
+    }
+    for (const [participantKey, participant] of this.participants)
+      if (
+        participant.disconnectedAt &&
+        now - participant.disconnectedAt >= 10_000
+      )
+        this.finalizeParticipantDisconnect(participantKey, participant);
+    if (sockets.length > 0 || this.participants.size > 0)
+      await this.state.storage.setAlarm?.(now + CONTROL_HEARTBEAT_INTERVAL_MS);
+    if (
+      this.route.kind === MEDIA_ROUTE_KIND.P2P &&
+      this.route.reason === "qualifying-direct"
+    )
+      this.checkQualificationComplete();
+    if (this.pendingRoute && now - this.pendingStartedAt > 15_000)
+      await this.handleProviderFailure(
+        this.pendingRoute.provider,
+        "provider-prepare-timeout",
+      );
+  }
+
+  async handleMessage(ws, session, envelope) {
+    const data =
+      envelope?.data && typeof envelope.data === "object"
+        ? envelope.data
+        : envelope;
+    const type = envelope?.type;
     const now = Date.now();
     session.lastHeartbeat = now;
 
     if (!session.authenticated) {
-      if (data.type !== MEDIA_CONTROL_CLIENT_HELLO) {
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.ERROR,
-            error: "Authentication required",
-          }),
-        );
+      if (type !== MEDIA_CONTROL_CLIENT_HELLO) {
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          error: "Authentication required",
+        });
         ws.close(1008, "Authentication required");
         return;
       }
 
       const verified = await this.verifyMediaTicket(data.ticket);
       if (!verified.valid) {
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.ERROR,
-            error: verified.error,
-          }),
-        );
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          error: verified.error,
+        });
         ws.close(1008, verified.error);
         return;
       }
 
+      if (
+        Number(data.protocolVersion) !== MEDIA_CONTROL_PROTOCOL_VERSION ||
+        Number(data.contractRevision) !== 2 ||
+        data.mediaSessionId !== session.mediaSessionId
+      ) {
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          error: "Media control protocol mismatch",
+        });
+        ws.close(4002, "Media client update required");
+        return;
+      }
+
       const claims = verified.claims;
+      if (this.channelId && claims.channelId !== this.channelId) {
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          error: "Media ticket channel mismatch",
+        });
+        ws.close(4003, "Media ticket channel mismatch");
+        return;
+      }
       session.authenticated = true;
       session.userId = claims.sub;
       session.deviceId = claims.deviceId;
       session.channelId = claims.channelId;
       session.connectionMode = claims.connectionMode || "auto";
       session.routeEpoch = claims.routeEpoch || 0;
+      session.providerCapabilities = Array.isArray(data.providerCapabilities)
+        ? data.providerCapabilities.filter((provider) =>
+            [SFU_PROVIDER.CLOUDFLARE_REALTIME, SFU_PROVIDER.MEDIASOUP].includes(
+              provider,
+            ),
+          )
+        : [SFU_PROVIDER.MEDIASOUP];
+      ws.serializeAttachment(session);
 
-      // Register participant
       const participantKey = `${claims.sub}:${claims.deviceId}`;
+      if (this.participants.size === 0 && this.epoch === 0)
+        this.commitRoute(
+          createLocalRoute(1, this.sourceRevision, "room-ready"),
+        );
+      const resumedParticipant = this.participants.get(participantKey);
       this.participants.set(participantKey, {
         userId: claims.sub,
         deviceId: claims.deviceId,
+        channelId: claims.channelId,
         peerId: session.peerId,
         ws,
-        sources: new Set(),
-        joinedAt: now,
+        sources: new Set(resumedParticipant?.sources || []),
+        providerCapabilities: new Set(session.providerCapabilities),
+        joinedAt: resumedParticipant?.joinedAt || now,
+        disconnectedAt: null,
       });
 
-      // Send welcome with current topology
-      ws.send(
-        JSON.stringify({
-          type: MEDIA_CONTROL_SERVER_HELLO,
-          protocolVersion: MEDIA_CONTROL_PROTOCOL_VERSION,
-          route: this.route,
-          epoch: this.epoch,
-          sourceRevision: this.sourceRevision,
-          participants: this.getParticipantList(),
-        }),
-      );
+      this.sendMessage(ws, "connected", { peerId: session.peerId });
+      if (this.participants.size === 1 && this.epoch === 0)
+        await this.commitRoute(
+          createLocalRoute(1, this.sourceRevision, "single-participant"),
+        );
+      else this.sendTopology(ws);
+      for (const publication of this.publishedSources.values())
+        if (publication.peerId !== session.peerId)
+          this.sendMessage(
+            ws,
+            MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+            publication,
+          );
+      if (this.pendingRoute)
+        await this.issueProviderTicket(
+          this.participants.get(participantKey),
+          this.pendingRoute,
+        );
 
       this.maybeStartQualification();
       return;
     }
 
-    switch (data.type) {
+    switch (type) {
       case MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT: {
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT_ACK,
-            timestamp: now,
-          }),
-        );
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT_ACK, {
+          sequence: data.sequence,
+          timestamp: now,
+        });
         break;
       }
 
       case MEDIA_CONTROL_MESSAGE_TYPES.P2P_SIGNAL: {
-        // Relay P2P signaling to target peer
         await this.relayP2PSignal(session, data);
         break;
       }
 
+      case MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY:
+      case MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE:
+        break;
+
       case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
-        // Update participant sources
         const participantKey = `${session.userId}:${session.deviceId}`;
         const participant = this.participants.get(participantKey);
         if (participant) {
           participant.sources = new Set(data.sources || []);
+          session.sources = [...participant.sources];
+          ws.serializeAttachment(session);
+          this.maybeStartQualification();
           this.sourceRevision++;
           this.broadcastTopology();
         }
@@ -171,69 +320,359 @@ export class MediaRoomDO {
       }
 
       case MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED: {
-        // Peer reports qualified connections
+        if (Number(data.epoch) !== this.epoch) break;
         const participantKey = `${session.userId}:${session.deviceId}`;
         const participant = this.participants.get(participantKey);
         if (participant) {
           this.qualificationState.set(session.peerId, {
-            qualifiedPeers: new Set(data.qualifiedPeerIds || []),
+            qualifiedPeers: new Set(
+              data.qualifiedPeerIds || data.qualifiedPeers || [],
+            ),
+            candidateReports: Array.isArray(data.candidateReports)
+              ? data.candidateReports
+              : [],
             ready: true,
           });
+          session.qualifiedPeerIds = [
+            ...(data.qualifiedPeerIds || data.qualifiedPeers || []),
+          ];
+          ws.serializeAttachment(session);
           this.checkQualificationComplete();
         }
         break;
       }
 
       case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED: {
-        // Peer reports P2P failure
         this.handleP2PFailure(session, data.reason);
         break;
       }
 
+      case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY: {
+        if (
+          this.pendingRoute &&
+          Number(data.epoch) === this.pendingRoute.epoch &&
+          data.provider === this.pendingRoute.provider
+        ) {
+          this.providerReadiness.add(session.peerId);
+          session.providerReadyEpoch = Number(data.epoch);
+          ws.serializeAttachment(session);
+          const expected = new Set(
+            [...this.participants.values()].map((entry) => entry.peerId),
+          );
+          if (
+            this.providerReadiness.size === expected.size &&
+            [...this.providerReadiness].every((peerId) => expected.has(peerId))
+          )
+            await this.maybeCommitPendingRoute();
+        }
+        break;
+      }
+
+      case MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_READY: {
+        if (
+          this.pendingRoute &&
+          Number(data.epoch) === this.pendingRoute.epoch
+        ) {
+          this.transitionReadiness.add(session.peerId);
+          await this.maybeCommitPendingRoute();
+        }
+        break;
+      }
+
+      case MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED: {
+        if (this.pendingRoute && Number(data.epoch) === this.pendingRoute.epoch)
+          await this.handleProviderFailure(
+            this.pendingRoute.provider,
+            data.reason || "provider-transition-failed",
+          );
+        break;
+      }
+
+      case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE: {
+        const failedPending =
+          this.pendingRoute && Number(data.epoch) === this.pendingRoute.epoch;
+        const failedActive =
+          this.route.kind === MEDIA_ROUTE_KIND.SFU &&
+          this.route.provider === data.provider &&
+          Number(data.epoch) === this.route.epoch;
+        if (failedPending || failedActive) {
+          this.providerReadiness.clear();
+          this.transitionReadiness.clear();
+          await this.handleProviderFailure(
+            data.provider,
+            data.reason || "client-provider-failure",
+          );
+        }
+        break;
+      }
+
+      case MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_REQUEST: {
+        await this.handleCloudflareRequest(ws, session, data);
+        break;
+      }
+
+      case MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION: {
+        if (session.cloudflareSessionId && data.trackName && data.source) {
+          const publication = {
+            sessionId: session.cloudflareSessionId,
+            trackName: data.trackName,
+            source: data.source,
+            userId: session.userId,
+            peerId: session.peerId,
+            closed: data.closed === true,
+          };
+          const publicationKey = `${session.peerId}:${data.source}`;
+          if (publication.closed) this.publishedSources.delete(publicationKey);
+          else this.publishedSources.set(publicationKey, publication);
+          void this.state.storage.put("publishedSources", [
+            ...this.publishedSources.values(),
+          ]);
+          for (const participant of this.participants.values())
+            if (participant.ws !== ws)
+              this.sendMessage(
+                participant.ws,
+                MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+                publication,
+              );
+        }
+        break;
+      }
+
       case MEDIA_CONTROL_MESSAGE_TYPES.RESUME: {
-        // Resume after control reconnect
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.WELCOME,
-            protocolVersion: MEDIA_CONTROL_PROTOCOL_VERSION,
-            route: this.route,
-            epoch: this.epoch,
-            sourceRevision: this.sourceRevision,
-            participants: this.getParticipantList(),
-            resumed: true,
-          }),
-        );
+        this.sendTopology(ws, { resumed: true });
         break;
       }
 
       default: {
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.ERROR,
-            error: `Unknown message type: ${data.type}`,
-          }),
-        );
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          error: `Unknown message type: ${type}`,
+        });
       }
     }
   }
 
   async verifyMediaTicket(ticket) {
-    // In production, verify against Supabase JWKS or local public key
-    // For now, basic validation
     if (!ticket || typeof ticket !== "string") {
       return { valid: false, error: "Missing ticket" };
     }
-    // TODO: Actual JWT verification with jose
-    return {
-      valid: true,
-      claims: {
-        sub: "test-user",
-        deviceId: "test-device",
-        channelId: "test-channel",
-        connectionMode: "auto",
-        routeEpoch: 0,
-      },
-    };
+    try {
+      const claims = await verifyMediaTicket(ticket, this.env);
+      if (!claims.sub || !claims.deviceId || !claims.channelId)
+        return {
+          valid: false,
+          error: "Media ticket is missing required claims",
+        };
+      if (!["auto", "direct"].includes(claims.connectionMode || "auto"))
+        return {
+          valid: false,
+          error: "Media ticket has an invalid connection mode",
+        };
+      return { valid: true, claims };
+    } catch (error) {
+      return { valid: false, error: error.message || "Invalid media ticket" };
+    }
+  }
+
+  async handleCloudflareRequest(ws, session, data) {
+    const requestId = data.requestId;
+    const operation = data.operation;
+    const appId = this.env.CLOUDFLARE_REALTIME_APP_ID;
+    const appSecret = this.env.CLOUDFLARE_REALTIME_APP_SECRET;
+    const sendResult = (result) =>
+      this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_RESPONSE, {
+        requestId,
+        ...result,
+      });
+    const selectedProvider = this.pendingRoute?.provider || this.route.provider;
+    if (selectedProvider !== SFU_PROVIDER.CLOUDFLARE_REALTIME) {
+      sendResult({ error: "Cloudflare Realtime is not the active route" });
+      return;
+    }
+    if (!requestId || !appId || !appSecret) {
+      sendResult({ error: "Cloudflare Realtime is unavailable" });
+      return;
+    }
+    const allowed = new Map([
+      ["new-session", { method: "POST", suffix: "sessions/new" }],
+      ["tracks-new", { method: "POST", suffix: "tracks/new" }],
+      ["tracks-update", { method: "PUT", suffix: "tracks/update" }],
+      ["tracks-close", { method: "PUT", suffix: "tracks/close" }],
+      ["renegotiate", { method: "PUT", suffix: "renegotiate" }],
+    ]);
+    const selected = allowed.get(operation);
+    if (!selected) {
+      sendResult({ error: "Unsupported Cloudflare operation" });
+      return;
+    }
+    if (operation !== "new-session" && !session.cloudflareSessionId) {
+      sendResult({ error: "Cloudflare session is not initialized" });
+      return;
+    }
+    if (operation === "tracks-new") {
+      const remoteTracks = (data.body?.tracks || []).filter(
+        (track) => track?.location === "remote",
+      );
+      const knownTracks = new Set(
+        [...this.publishedSources.values()].map(
+          (publication) => `${publication.sessionId}:${publication.trackName}`,
+        ),
+      );
+      if (
+        remoteTracks.some(
+          (track) => !knownTracks.has(`${track.sessionId}:${track.trackName}`),
+        )
+      ) {
+        sendResult({ error: "Cloudflare track is not published in this room" });
+        return;
+      }
+    }
+    const sessionPrefix =
+      operation === "new-session"
+        ? ""
+        : `sessions/${encodeURIComponent(session.cloudflareSessionId)}/`;
+    let response;
+    try {
+      response = await fetch(
+        `https://rtc.live.cloudflare.com/v1/apps/${encodeURIComponent(appId)}/${sessionPrefix}${selected.suffix}`,
+        {
+          method: selected.method,
+          headers: {
+            Authorization: `Bearer ${appSecret}`,
+            "Content-Type": "application/json",
+          },
+          body:
+            operation === "new-session"
+              ? undefined
+              : JSON.stringify(data.body || {}),
+        },
+      );
+    } catch {
+      sendResult({ error: "Cloudflare Realtime request failed" });
+      return;
+    }
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && operation === "new-session" && result.sessionId) {
+      session.cloudflareSessionId = result.sessionId;
+      ws.serializeAttachment(session);
+    }
+    sendResult(
+      response.ok
+        ? { result }
+        : {
+            error:
+              result.errorDescription || `Cloudflare error ${response.status}`,
+          },
+    );
+  }
+
+  async loadDurableState() {
+    if (this.stateLoaded) return;
+    const [
+      route,
+      epoch,
+      sourceRevision,
+      pendingRoute,
+      pendingStartedAt,
+      publishedSources,
+      qualifiedParticipantSignature,
+      qualificationStartedAt,
+    ] = await Promise.all([
+      this.state.storage.get("route"),
+      this.state.storage.get("epoch"),
+      this.state.storage.get("sourceRevision"),
+      this.state.storage.get("pendingRoute"),
+      this.state.storage.get("pendingStartedAt"),
+      this.state.storage.get("publishedSources"),
+      this.state.storage.get("qualifiedParticipantSignature"),
+      this.state.storage.get("qualificationStartedAt"),
+    ]);
+    if (route) this.route = route;
+    if (Number.isSafeInteger(epoch)) this.epoch = epoch;
+    if (Number.isSafeInteger(sourceRevision))
+      this.sourceRevision = sourceRevision;
+    if (pendingRoute) this.pendingRoute = pendingRoute;
+    if (Number.isSafeInteger(pendingStartedAt))
+      this.pendingStartedAt = pendingStartedAt;
+    if (Array.isArray(publishedSources))
+      this.publishedSources = new Map(
+        publishedSources.map((publication) => [
+          `${publication.peerId}:${publication.source}`,
+          publication,
+        ]),
+      );
+    if (typeof qualifiedParticipantSignature === "string")
+      this.qualifiedParticipantSignature = qualifiedParticipantSignature;
+    if (Number.isSafeInteger(qualificationStartedAt))
+      this.qualificationStartedAt = qualificationStartedAt;
+    this.stateLoaded = true;
+    for (const ws of this.state.getWebSockets?.() || []) this.getSession(ws);
+  }
+
+  getSession(ws) {
+    const current = this.sessions.get(ws);
+    if (current) return current;
+    const restored = ws.deserializeAttachment?.();
+    if (restored) {
+      this.sessions.set(ws, restored);
+      if (restored.authenticated) {
+        const participantKey = `${restored.userId}:${restored.deviceId}`;
+        this.participants.set(participantKey, {
+          userId: restored.userId,
+          deviceId: restored.deviceId,
+          channelId: restored.channelId,
+          peerId: restored.peerId,
+          ws,
+          sources: new Set(restored.sources || []),
+          providerCapabilities: new Set(restored.providerCapabilities || []),
+          joinedAt: restored.joinedAt || Date.now(),
+        });
+        if (Array.isArray(restored.qualifiedPeerIds))
+          this.qualificationState.set(restored.peerId, {
+            qualifiedPeers: new Set(restored.qualifiedPeerIds),
+            ready: true,
+          });
+        if (restored.providerReadyEpoch === this.pendingRoute?.epoch)
+          this.providerReadiness.add(restored.peerId);
+      }
+    }
+    return restored;
+  }
+
+  sendMessage(ws, type, data = {}) {
+    if (
+      !ws ||
+      (ws.readyState !== undefined && ws.readyState !== WebSocket.OPEN)
+    )
+      return;
+    ws.send(JSON.stringify({ type, data }));
+  }
+
+  sendTopology(ws, extra = {}) {
+    const pending = this.pendingRoute;
+    const mode = pending
+      ? "switching"
+      : this.route.kind === MEDIA_ROUTE_KIND.LOCAL
+        ? "idle"
+        : this.route.kind === MEDIA_ROUTE_KIND.P2P
+          ? this.route.reason === "qualifying-direct"
+            ? "probing"
+            : "p2p"
+          : "sfu";
+    this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE, {
+      route: this.route,
+      mode,
+      epoch: pending?.epoch || this.epoch,
+      preparedEpoch: pending?.epoch || this.epoch,
+      provider: pending?.provider || this.route.provider,
+      reason: pending?.reason || this.route.reason,
+      target: pending ? "sfu" : undefined,
+      targetProvider: pending?.provider,
+      targetRoute: pending || undefined,
+      sourceRevision: this.sourceRevision,
+      participants: this.getParticipantList(),
+      peers: this.getParticipantList(),
+      ...extra,
+    });
   }
 
   async relayP2PSignal(fromSession, data) {
@@ -242,13 +681,10 @@ export class MediaRoomDO {
 
     for (const [ws, session] of this.sessions) {
       if (session.peerId === targetPeerId && session.authenticated) {
-        ws.send(
-          JSON.stringify({
-            type: MEDIA_CONTROL_MESSAGE_TYPES.P2P_SIGNAL_RELAY,
-            fromPeerId: fromSession.peerId,
-            signal: data.signal,
-          }),
-        );
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_SIGNAL, {
+          peerId: fromSession.peerId,
+          ...data.signal,
+        });
         break;
       }
     }
@@ -259,50 +695,180 @@ export class MediaRoomDO {
       this.route.kind === MEDIA_ROUTE_KIND.P2P &&
       this.route.path === P2P_PATH.DIRECT
     ) {
-      // Trigger fallback to SFU
-      this.beginTransition(SFU_PROVIDER.MEDIASOUP, `p2p-failed-${reason}`);
+      if (this.getConnectionMode() === "direct") {
+        this.sendMessage(session.ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "DIRECT_MEDIA_UNAVAILABLE",
+          error: "Direct media connection failed",
+        });
+        return;
+      }
+      void this.beginTransition(SFU_PROVIDER.MEDIASOUP, `p2p-failed-${reason}`);
     }
+  }
+
+  async handleProviderFailure(provider, reason) {
+    const registryNamespace = this.env.PROVIDER_REGISTRY_DO;
+    if (registryNamespace) {
+      const registryId = registryNamespace.idFromName("global");
+      const registry = registryNamespace.get(registryId);
+      await registry.fetch(
+        new Request("https://registry/report-failure", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.env.MEDIA_CONTROL_ADMIN_TOKEN || ""}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            providerId:
+              provider === SFU_PROVIDER.CLOUDFLARE_REALTIME
+                ? "cloudflare-realtime-primary"
+                : "selfhost-primary",
+            error: reason,
+          }),
+        }),
+      );
+    }
+    const alternate =
+      provider === SFU_PROVIDER.CLOUDFLARE_REALTIME
+        ? SFU_PROVIDER.MEDIASOUP
+        : SFU_PROVIDER.CLOUDFLARE_REALTIME;
+    if (this.pendingRoute?.provider === provider) {
+      this.pendingRoute = null;
+      this.pendingStartedAt = 0;
+      this.providerReadiness.clear();
+      this.transitionReadiness.clear();
+      void Promise.all([
+        this.state.storage.delete("pendingRoute"),
+        this.state.storage.delete("pendingStartedAt"),
+      ]);
+    }
+    await this.beginTransition(
+      alternate,
+      `provider-failed-${reason}`,
+      provider,
+    );
   }
 
   maybeStartQualification() {
     const participantCount = this.participants.size;
-    if (participantCount < 2) return;
+    if (participantCount === 0) return;
+    const hasVideo = [...this.participants.values()].some((participant) =>
+      [...participant.sources].some((source) =>
+        ["camera", "screen"].includes(String(source)),
+      ),
+    );
+    const connectionMode = this.getConnectionMode();
+    const maxP2pParticipants = hasVideo
+      ? 4
+      : connectionMode === "direct"
+        ? 12
+        : 8;
+    if (participantCount > maxP2pParticipants) {
+      if (connectionMode === "direct") {
+        const latest = [...this.sessions.values()].find(
+          (session) => session.authenticated,
+        );
+        this.sendMessage(latest?.ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "DIRECT_PARTICIPANT_LIMIT_EXCEEDED",
+          error: "Direct mode supports fewer participants for this media mix",
+        });
+        return;
+      }
+      if (
+        !this.pendingRoute &&
+        (this.route.kind !== MEDIA_ROUTE_KIND.SFU ||
+          this.route.provider !== SFU_PROVIDER.CLOUDFLARE_REALTIME)
+      )
+        void this.beginTransition(SFU_PROVIDER.CLOUDFLARE_REALTIME);
+      return;
+    }
+    if (participantCount === 1) {
+      if (
+        connectionMode === "auto" &&
+        !this.pendingRoute &&
+        this.route.kind === MEDIA_ROUTE_KIND.LOCAL
+      )
+        void this.beginTransition(SFU_PROVIDER.CLOUDFLARE_REALTIME);
+      return;
+    }
 
-    // Check if all participants are ready for qualification
+    if (
+      this.route.kind === MEDIA_ROUTE_KIND.P2P &&
+      this.route.reason === "qualified-direct-mesh" &&
+      this.qualifiedParticipantSignature === this.getParticipantSignature()
+    )
+      return;
+
+    if (this.pendingRoute) {
+      this.pendingRoute = null;
+      this.pendingStartedAt = 0;
+      this.epoch += 1;
+      this.providerReadiness.clear();
+      this.transitionReadiness.clear();
+      void Promise.all([
+        this.state.storage.put("epoch", this.epoch),
+        this.state.storage.delete("pendingRoute"),
+        this.state.storage.delete("pendingStartedAt"),
+      ]);
+    }
+
     const allReady = [...this.participants.values()].every(
-      (p) => p.ws.readyState === WebSocket.OPEN,
+      (p) => p.ws?.readyState === WebSocket.OPEN,
     );
     if (!allReady) return;
 
-    // Start qualification phase
     this.route = createP2PRoute(
       P2P_PATH.DIRECT,
       ++this.epoch,
       this.sourceRevision,
       "qualifying-direct",
     );
+    this.qualificationStartedAt = Date.now();
+    void this.state.storage.put(
+      "qualificationStartedAt",
+      this.qualificationStartedAt,
+    );
     this.transitionGeneration++;
 
     for (const participant of this.participants.values()) {
-      participant.ws.send(
-        JSON.stringify({
-          type: MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE,
+      this.sendMessage(
+        participant.ws,
+        MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE,
+        {
           route: this.route,
           epoch: this.epoch,
           sourceRevision: this.sourceRevision,
           action: "qualify-p2p",
-        }),
+        },
       );
     }
+  }
+
+  async maybeCommitPendingRoute() {
+    if (!this.pendingRoute) return;
+    const expected = new Set(
+      [...this.participants.values()].map((participant) => participant.peerId),
+    );
+    if (
+      this.providerReadiness.size === expected.size &&
+      [...this.providerReadiness].every((peerId) => expected.has(peerId)) &&
+      this.transitionReadiness.size === expected.size &&
+      [...this.transitionReadiness].every((peerId) => expected.has(peerId))
+    )
+      await this.commitRoute(this.pendingRoute);
   }
 
   checkQualificationComplete() {
     const expectedPeers = new Set(
       [...this.participants.values()].map((p) => p.peerId),
     );
-    let allQualified = true;
+    let allQualified = this.qualificationState.size === expectedPeers.size;
 
     for (const [peerId, state] of this.qualificationState) {
+      if (!expectedPeers.has(peerId)) {
+        allQualified = false;
+        break;
+      }
       if (!state.ready) {
         allQualified = false;
         break;
@@ -314,9 +880,24 @@ export class MediaRoomDO {
         allQualified = false;
         break;
       }
+      for (const qualifiedPeerId of qualified)
+        if (!expectedForPeer.has(qualifiedPeerId)) {
+          allQualified = false;
+          break;
+        }
+      if (!allQualified) break;
     }
 
     if (allQualified && this.participants.size >= 2) {
+      if (
+        Date.now() - this.qualificationStartedAt <
+        P2P_QUALIFICATION_STABILITY_MS
+      ) {
+        void this.state.storage.setAlarm?.(
+          this.qualificationStartedAt + P2P_QUALIFICATION_STABILITY_MS,
+        );
+        return;
+      }
       this.commitRoute(
         createP2PRoute(
           P2P_PATH.DIRECT,
@@ -328,9 +909,53 @@ export class MediaRoomDO {
     }
   }
 
-  beginTransition(targetProvider, reason) {
+  async beginTransition(targetProvider, reason, excludedProvider = null) {
+    if (this.pendingRoute || this.transitionInFlight) return;
+    this.transitionInFlight = true;
+    let selectedProvider = targetProvider;
+    const registryNamespace = this.env.PROVIDER_REGISTRY_DO;
+    if (registryNamespace) {
+      try {
+        const registryId = registryNamespace.idFromName("global");
+        const registry = registryNamespace.get(registryId);
+        const response = await registry.fetch(
+          new Request("https://registry/select", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${this.env.MEDIA_CONTROL_ADMIN_TOKEN || ""}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              roomId: this.getRoomId(),
+              connectionMode: this.getConnectionMode(),
+              participantCount: this.participants.size,
+              hasVideo: [...this.participants.values()].some((participant) =>
+                [...participant.sources].some((source) =>
+                  String(source).includes("video"),
+                ),
+              ),
+              requiredSources: [],
+              excludedProvider,
+            }),
+          }),
+        );
+        if (response.ok) {
+          const selection = await response.json();
+          selectedProvider = selection.route?.provider || selectedProvider;
+        }
+      } catch {}
+    }
+    const supportedProviders = this.getCommonProviderCapabilities();
+    if (!supportedProviders.has(selectedProvider)) {
+      const alternateProvider =
+        selectedProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME
+          ? SFU_PROVIDER.MEDIASOUP
+          : SFU_PROVIDER.CLOUDFLARE_REALTIME;
+      if (supportedProviders.has(alternateProvider))
+        selectedProvider = alternateProvider;
+    }
     const targetRoute =
-      targetProvider === SFU_PROVIDER.MEDIASOUP
+      selectedProvider === SFU_PROVIDER.MEDIASOUP
         ? createSFURoute(
             SFU_PROVIDER.MEDIASOUP,
             this.epoch + 1,
@@ -345,28 +970,63 @@ export class MediaRoomDO {
           );
 
     this.pendingRoute = targetRoute;
+    this.pendingStartedAt = Date.now();
+    void Promise.all([
+      this.state.storage.put("pendingRoute", targetRoute),
+      this.state.storage.put("pendingStartedAt", this.pendingStartedAt),
+    ]);
+    this.providerReadiness.clear();
+    this.transitionReadiness.clear();
     this.route = {
       ...this.route,
-      reason: `transitioning-to-${targetProvider}`,
+      reason: `transitioning-to-${selectedProvider}`,
     };
 
     this.broadcastTopology();
 
-    // Request provider tickets for participants
     this.issueProviderTickets(targetRoute);
+    this.transitionInFlight = false;
+  }
+
+  getCommonProviderCapabilities() {
+    const participants = [...this.participants.values()];
+    if (!participants.length)
+      return new Set([
+        SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        SFU_PROVIDER.MEDIASOUP,
+      ]);
+    return new Set(
+      [SFU_PROVIDER.CLOUDFLARE_REALTIME, SFU_PROVIDER.MEDIASOUP].filter(
+        (provider) =>
+          participants.every((participant) =>
+            participant.providerCapabilities?.has(provider),
+          ),
+      ),
+    );
   }
 
   async issueProviderTickets(route) {
-    for (const participant of this.participants.values()) {
-      const ticket = await this.createProviderTicket(participant, route);
-      participant.ws.send(
-        JSON.stringify({
-          type: MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_TICKET,
-          route,
-          ticket,
-        }),
-      );
-    }
+    await Promise.all(
+      [...this.participants.values()]
+        .filter((participant) => participant.ws)
+        .map((participant) => this.issueProviderTicket(participant, route)),
+    );
+  }
+
+  async issueProviderTicket(participant, route) {
+    if (route.provider !== SFU_PROVIDER.MEDIASOUP) return;
+    const ticket = await this.createProviderTicket(participant, route);
+    this.sendMessage(
+      participant.ws,
+      MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_TICKET,
+      {
+        route,
+        provider: route.provider,
+        epoch: route.epoch,
+        signalingUrl: this.env.DSPEAK_SFU_SIGNALING_URL,
+        ticket,
+      },
+    );
   }
 
   async createProviderTicket(participant, route) {
@@ -376,7 +1036,7 @@ export class MediaRoomDO {
       aud: "dspeak-sfu",
       sub: participant.userId,
       deviceId: participant.deviceId,
-      roomId: participant.userId, // channelId = roomId for media
+      roomId: participant.channelId,
       routeEpoch: route.epoch,
       providerId: "selfhost-primary",
       generation: 1,
@@ -384,13 +1044,12 @@ export class MediaRoomDO {
       iat: Math.floor(Date.now() / 1000),
       exp: Math.floor(Date.now() / 1000) + 120,
       jti: crypto.randomUUID(),
-      protocolRevision: 1,
+      protocolRevision: MEDIA_PROVIDER_PROTOCOL_REVISION,
     };
     return signProviderTicket(claims, this.env);
   }
 
   commitRoute(route) {
-    // Validate route for connection mode
     const connectionMode = this.getConnectionMode();
     const validation = validateRouteForMode(route, connectionMode);
     if (!validation.valid) {
@@ -400,26 +1059,46 @@ export class MediaRoomDO {
 
     this.route = route;
     this.epoch = route.epoch;
+    this.qualifiedParticipantSignature =
+      route.kind === MEDIA_ROUTE_KIND.P2P
+        ? this.getParticipantSignature()
+        : null;
     this.pendingRoute = null;
+    this.pendingStartedAt = 0;
     this.qualificationState.clear();
+    this.transitionReadiness.clear();
+    void Promise.all([
+      this.state.storage.put("route", route),
+      this.state.storage.put("epoch", this.epoch),
+      this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put(
+        "qualifiedParticipantSignature",
+        this.qualifiedParticipantSignature,
+      ),
+      this.state.storage.put(
+        "qualificationStartedAt",
+        this.qualificationStartedAt,
+      ),
+      this.state.storage.delete("pendingRoute"),
+      this.state.storage.delete("pendingStartedAt"),
+    ]);
 
     this.broadcastTopology();
   }
 
   broadcastTopology() {
-    const data = {
-      type: MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE,
-      route: this.route,
-      epoch: this.epoch,
-      sourceRevision: this.sourceRevision,
-      participants: this.getParticipantList(),
-    };
-
     for (const [ws, session] of this.sessions) {
       if (session.authenticated && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
+        this.sendTopology(ws);
       }
     }
+  }
+
+  getParticipantSignature() {
+    return [...this.participants.values()]
+      .map((participant) => participant.peerId)
+      .sort()
+      .join(",");
   }
 
   getParticipantList() {
@@ -432,67 +1111,68 @@ export class MediaRoomDO {
   }
 
   getConnectionMode() {
-    // Get from first authenticated session
     for (const session of this.sessions.values()) {
       if (session.authenticated) return session.connectionMode;
     }
     return "auto";
   }
 
+  getRoomId() {
+    for (const session of this.sessions.values()) {
+      if (session.authenticated && session.channelId) return session.channelId;
+    }
+    return "unknown";
+  }
+
   handleDisconnect(ws, session) {
     this.sessions.delete(ws);
-
     if (session.authenticated) {
       const participantKey = `${session.userId}:${session.deviceId}`;
-      this.participants.delete(participantKey);
-      this.sourceRevision++;
-
-      // Clean up qualification state
-      this.qualificationState.delete(session.peerId);
-
-      // Re-evaluate topology
-      if (this.participants.size < 2) {
-        this.route = createLocalRoute(
-          this.epoch,
-          this.sourceRevision,
-          "waiting-for-peer",
-        );
-      } else if (this.route.kind === MEDIA_ROUTE_KIND.P2P) {
-        // Check if mesh is still complete
-        this.maybeStartQualification();
+      const participant = this.participants.get(participantKey);
+      if (participant?.ws === ws) {
+        participant.ws = null;
+        participant.disconnectedAt = Date.now();
+        this.startControlLeaseTimer();
       }
-
-      this.broadcastTopology();
     }
-
-    if (this.sessions.size === 0) {
+    if (this.sessions.size === 0 && this.participants.size === 0)
       this.stopControlLeaseTimer();
+  }
+
+  finalizeParticipantDisconnect(participantKey, participant) {
+    if (!this.participants.delete(participantKey)) return;
+    this.sourceRevision++;
+    this.qualificationState.delete(participant.peerId);
+    this.providerReadiness.delete(participant.peerId);
+    this.transitionReadiness.delete(participant.peerId);
+    for (const key of this.publishedSources.keys())
+      if (key.startsWith(`${participant.peerId}:`))
+        this.publishedSources.delete(key);
+    void this.state.storage.put("publishedSources", [
+      ...this.publishedSources.values(),
+    ]);
+    if (this.participants.size < 2) {
+      void this.commitRoute(
+        createLocalRoute(
+          this.epoch + 1,
+          this.sourceRevision,
+          "participant-left",
+        ),
+      ).then(() => this.maybeStartQualification());
+    } else if (this.route.kind === MEDIA_ROUTE_KIND.P2P) {
+      this.maybeStartQualification();
+    } else if (this.pendingRoute) {
+      void this.maybeCommitPendingRoute();
     }
   }
 
   startControlLeaseTimer() {
-    if (this.controlLeaseTimer) return;
-    this.controlLeaseTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [ws, session] of this.sessions) {
-        if (
-          session.authenticated &&
-          now - session.lastHeartbeat > CONTROL_HEARTBEAT_TIMEOUT_MS
-        ) {
-          console.warn(
-            "[MediaRoomDO] Control lease expired for",
-            session.userId,
-          );
-          ws.close(1008, "Control lease expired");
-        }
-      }
-    }, CONTROL_HEARTBEAT_INTERVAL_MS);
+    void this.state.storage.setAlarm?.(
+      Date.now() + CONTROL_HEARTBEAT_INTERVAL_MS,
+    );
   }
 
   stopControlLeaseTimer() {
-    if (this.controlLeaseTimer) {
-      clearInterval(this.controlLeaseTimer);
-      this.controlLeaseTimer = null;
-    }
+    void this.state.storage.deleteAlarm?.();
   }
 }

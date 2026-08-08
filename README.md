@@ -11,10 +11,10 @@ Runs on Cloudflare Workers. One Worker entrypoint + two Durable Objects:
 - **Worker (Hono)** — HTTP endpoints, WebSocket upgrade to the per-channel DO.
 
 The main dSpeak app (`dspeak`) calls `POST /api/media/bootstrap` on its own
-server, which signs a short-lived media ticket and returns the WebSocket URL
-
-- ticket. This Worker/DO verifies that ticket and admits the client to the
-  channel control plane. The DO also mints provider tickets for `dspeak-sfu`.
+server, which signs a short-lived media ticket and returns the WebSocket URL.
+This Worker/DO verifies that ticket and admits the client to the channel control
+plane. The DO mints provider tickets only for the standalone `dspeak-sfu` route;
+Cloudflare Realtime requests stay inside the DO.
 
 ## Architecture / flow
 
@@ -115,11 +115,14 @@ warning: wrangler secret put with --env requires `wrangler.toml` env config
 
 ## Endpoints / protocol
 
-| Endpoint                       | Purpose                             |
-| ------------------------------ | ----------------------------------- |
-| `GET /healthz`                 | Worker liveness                     |
-| `WS /media-control/:channelId` | Upgrade to `MediaRoomDO(channelId)` |
-| `POST /media-bootstrap`        | (removed — see below)               |
+| Endpoint                       | Purpose                              |
+| ------------------------------ | ------------------------------------ |
+| `GET /healthz`                 | Worker liveness                      |
+| `WS /media-control/:channelId` | Upgrade to `MediaRoomDO(channelId)`  |
+| `POST /media-bootstrap`        | (removed — see below)                |
+| `POST /registry/register`      | Register a provider (admin only)     |
+| `POST /registry/select`        | Select a route (internal/admin only) |
+| `GET /registry/health`         | Inspect providers (admin only)       |
 
 ### WebSocket protocol
 

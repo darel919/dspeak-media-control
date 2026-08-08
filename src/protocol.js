@@ -1,20 +1,27 @@
 export const MEDIA_CONTROL_PROTOCOL_VERSION = 919;
+export const MEDIA_PROVIDER_PROTOCOL_REVISION = 919;
 
 export const MEDIA_CONTROL_CLIENT_HELLO = "hello919";
 export const MEDIA_CONTROL_SERVER_HELLO = "hi919";
 export const MEDIA_CONTROL_ERROR = "error919";
 
 export const MEDIA_CONTROL_MESSAGE_TYPES = {
-  // Client -> DO
   HELLO: MEDIA_CONTROL_CLIENT_HELLO,
   P2P_SIGNAL: "p2p-signal",
+  P2P_READY: "p2p-ready",
   MEDIA_SOURCES: "media-sources",
+  PARTICIPANT_VOICE_STATE: "participant-voice-state",
   P2P_QUALIFIED: "p2p-qualified",
   P2P_FAILED: "p2p-failed",
+  PROVIDER_READY: "provider-ready",
+  PROVIDER_FAILURE: "provider-failure",
+  TOPOLOGY_READY: "topology-ready",
+  TOPOLOGY_FAILED: "topology-failed",
+  CLOUDFLARE_REQUEST: "cloudflare-request",
+  CLOUDFLARE_PUBLICATION: "cloudflare-publication",
   HEARTBEAT: "heartbeat",
   RESUME: "resume",
 
-  // DO -> Client
   WELCOME: MEDIA_CONTROL_SERVER_HELLO,
   TOPOLOGY_STATE: "topology-state",
   P2P_SIGNAL_RELAY: "p2p-signal-relay",
@@ -22,6 +29,8 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   HEARTBEAT_ACK: "heartbeat-ack",
   ERROR: MEDIA_CONTROL_ERROR,
   PROVIDER_TICKET: "provider-ticket",
+  CLOUDFLARE_RESPONSE: "cloudflare-response",
+  CLOUDFLARE_PUBLICATION_AVAILABLE: "cloudflare-publication-available",
 };
 
 export const ROOM_STATE = {

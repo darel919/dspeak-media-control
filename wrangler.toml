@@ -17,6 +17,8 @@ class_name = "ProviderRegistryDO"
 [vars]
 MEDIA_CONTROL_ISSUER = "dspeak-media-control"
 PROVIDER_TICKET_TTL_SECONDS = "120"
+DSPEAK_SFU_SIGNALING_URL = "wss://sfu.example.com/v1/ws"
+CLOUDFLARE_REALTIME_APP_ID = "59759088ce5e004e5c70411ac799980b"
 
 [exports.MediaRoomDO]
 type = "durable-object"
@@ -29,3 +31,5 @@ storage = "sqlite"
 # Secrets (set via `wrangler secret put`)
 # MEDIA_TICKET_PUBLIC_KEY        Ed25519 public key — verifies media tickets signed by dspeak/Vercel
 # PROVIDER_TICKET_PRIVATE_KEY    Ed25519 private key — signs provider tickets for dspeak-sfu
+# MEDIA_CONTROL_ADMIN_TOKEN      shared secret for registry/admin calls
+# CLOUDFLARE_REALTIME_APP_SECRET Cloudflare Realtime application secret
