@@ -1,0 +1,330 @@
+import {
+  MEDIA_CONTROL_CLIENT_HELLO,
+  MEDIA_CONTROL_MESSAGE_TYPES,
+  MEDIA_CONTROL_PROTOCOL_VERSION,
+  SFU_PROVIDER,
+} from "./protocol.js";
+import { verifyMediaTicket } from "./tickets.js";
+import {
+  MAX_CONTROL_MESSAGE_BYTES,
+  normalizeMediaSources,
+} from "./media-room-contracts.ts";
+import {
+  handleCloudflareRequest,
+  handleP2PFailure,
+  handleProviderFailure,
+} from "./media-room-provider.ts";
+import { mediaDebug } from "./debug.ts";
+import { normalizeQoePath } from "./qoe.ts";
+
+export async function handleRoomMessage(room, ws, session, envelope) {
+  const data =
+    envelope?.data && typeof envelope.data === "object"
+      ? envelope.data
+      : envelope;
+  const type = envelope?.type;
+  const now = Date.now();
+  session.lastHeartbeat = now;
+
+  if (!session.authenticated) {
+    await authenticateRoomSession(room, ws, session, type, data, now);
+    return;
+  }
+
+  switch (type) {
+    case MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT: {
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT_ACK, {
+        sequence: data.sequence,
+        timestamp: now,
+      });
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.P2P_SIGNAL:
+      await room.relayP2PSignal(session, data);
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY:
+    case MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE:
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      if (!participant) break;
+      const sources = normalizeMediaSources(data.sources);
+      if (!sources) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "INVALID_MEDIA_SOURCES",
+          error: "Media source identifiers are invalid",
+        });
+        break;
+      }
+      participant.sources = new Set(sources);
+      session.sources = [...participant.sources];
+      ws.serializeAttachment(session);
+      room.maybeStartQualification();
+      room.sourceRevision++;
+      room.broadcastTopology();
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED: {
+      if (Number(data.epoch) !== room.epoch) break;
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      if (!participant) break;
+      const qualifiedPeerIds =
+        data.qualifiedPeerIds || data.qualifiedPeers || [];
+      room.qualificationState.set(session.peerId, {
+        qualifiedPeers: new Set(qualifiedPeerIds),
+        candidateReports: Array.isArray(data.candidateReports)
+          ? data.candidateReports
+          : [],
+        ready: true,
+      });
+      session.qualifiedPeerIds = [...qualifiedPeerIds];
+      ws.serializeAttachment(session);
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED, {
+        epoch: room.epoch,
+        acknowledged: true,
+        qualifiedPeerIds: [
+          ...room.qualificationState.get(session.peerId).qualifiedPeers,
+        ],
+      });
+      room.checkQualificationComplete();
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED:
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED, {
+        epoch: Number(data.epoch) || room.epoch,
+        acknowledged: true,
+        failed: true,
+        reason: data.reason || "p2p-failed",
+      });
+      handleP2PFailure(room, session, data.reason);
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_QOE: {
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      if (!participant || !Array.isArray(data.paths)) break;
+      const provider = String(data.provider || "");
+      const previous = room.qoeMetrics.get(participant.peerId);
+      room.qoeMetrics.set(participant.peerId, {
+        provider,
+        paths: data.paths.slice(0, 32).map((path) => normalizeQoePath(path)),
+        sampledAt: Number(data.sampledAt) || Date.now(),
+        stableSince:
+          previous?.provider === provider ? previous.stableSince : Date.now(),
+      });
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY:
+      await handleProviderReady(room, ws, session, data);
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_READY:
+      await handleTopologyReady(room, session, data);
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED:
+      if (room.pendingRoute && Number(data.epoch) === room.pendingRoute.epoch)
+        await handleProviderFailure(
+          room,
+          room.pendingRoute.provider,
+          data.reason || "provider-transition-failed",
+        );
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE: {
+      mediaDebug(room.env, "room.provider-failure", {
+        provider: data.provider,
+        epoch: data.epoch,
+        reason: data.reason,
+      });
+      const failedPending =
+        room.pendingRoute && Number(data.epoch) === room.pendingRoute.epoch;
+      const failedActive =
+        room.route.kind === "sfu" &&
+        room.route.provider === data.provider &&
+        Number(data.epoch) === room.route.epoch;
+      if (failedPending || failedActive) {
+        room.providerReadiness.clear();
+        room.transitionReadiness.clear();
+        await handleProviderFailure(
+          room,
+          data.provider,
+          data.reason || "client-provider-failure",
+        );
+      }
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_REQUEST:
+      await handleCloudflareRequest(room, ws, session, data);
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION:
+      await handleCloudflarePublication(room, ws, session, data);
+      break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.RESUME:
+      room.sendTopology(ws, { resumed: true });
+      break;
+    default:
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+        error: `Unknown message type: ${type}`,
+      });
+  }
+}
+
+async function authenticateRoomSession(room, ws, session, type, data, now) {
+  if (type !== MEDIA_CONTROL_CLIENT_HELLO) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      error: "Authentication required",
+    });
+    ws.close(1008, "Authentication required");
+    return;
+  }
+  const verified = await verifyRoomTicket(room, data.ticket);
+  if (!verified.valid) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      error: verified.error,
+    });
+    ws.close(1008, verified.error);
+    return;
+  }
+  if (
+    Number(data.protocolVersion) !== MEDIA_CONTROL_PROTOCOL_VERSION ||
+    Number(data.contractRevision) !== 2 ||
+    data.mediaSessionId !== session.mediaSessionId
+  ) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      error: "Media control protocol mismatch",
+    });
+    ws.close(4002, "Media client update required");
+    return;
+  }
+  const claims = verified.claims;
+  if (room.channelId && claims.channelId !== room.channelId) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      error: "Media ticket channel mismatch",
+    });
+    ws.close(4003, "Media ticket channel mismatch");
+    return;
+  }
+  session.authenticated = true;
+  session.userId = claims.sub;
+  session.deviceId = claims.deviceId;
+  session.channelId = claims.channelId;
+  session.connectionMode = claims.connectionMode || "auto";
+  session.routeEpoch = claims.routeEpoch || 0;
+  const configured = room.getConfiguredProviderCapabilities();
+  session.providerCapabilities = Array.isArray(data.providerCapabilities)
+    ? data.providerCapabilities.filter((provider) => configured.has(provider))
+    : [...configured];
+  ws.serializeAttachment(session);
+  mediaDebug(room.env, "room.client-authenticated", {
+    peerId: session.peerId,
+    connectionMode: session.connectionMode,
+    capabilities: session.providerCapabilities,
+  });
+  const participantKey = `${claims.sub}:${claims.deviceId}`;
+  if (room.participants.size === 0 && room.epoch === 0)
+    room.commitRoute(room.createInitialRoute("room-ready"));
+  const resumedParticipant = room.participants.get(participantKey);
+  room.participants.set(participantKey, {
+    userId: claims.sub,
+    deviceId: claims.deviceId,
+    channelId: claims.channelId,
+    peerId: session.peerId,
+    ws,
+    sources: new Set(resumedParticipant?.sources || []),
+    providerCapabilities: new Set(session.providerCapabilities),
+    joinedAt: resumedParticipant?.joinedAt || now,
+    disconnectedAt: null,
+  });
+  room.sendMessage(ws, "connected", { peerId: session.peerId });
+  if (room.participants.size === 1 && room.epoch === 0)
+    await room.commitRoute(room.createInitialRoute("single-participant"));
+  else room.sendTopology(ws);
+  for (const publication of room.publishedSources.values())
+    if (publication.peerId !== session.peerId)
+      room.sendMessage(
+        ws,
+        MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+        publication,
+      );
+  if (room.pendingRoute)
+    await room.issueProviderTicket(
+      room.participants.get(participantKey),
+      room.pendingRoute,
+    );
+  room.maybeStartQualification();
+}
+
+async function handleProviderReady(room, ws, session, data) {
+  if (
+    !room.pendingRoute ||
+    Number(data.epoch) !== room.pendingRoute.epoch ||
+    data.provider !== room.pendingRoute.provider
+  )
+    return;
+  room.providerReadiness.add(session.peerId);
+  session.providerReadyEpoch = Number(data.epoch);
+  ws.serializeAttachment(session);
+  room.providerHealth.set(data.provider, {
+    healthy: true,
+    epoch: Number(data.epoch),
+    unhealthyUntil: 0,
+    updatedAt: Date.now(),
+  });
+  void room.state.storage.put(
+    "providerHealth",
+    Object.fromEntries(room.providerHealth),
+  );
+  await room.maybeCommitPendingRoute();
+}
+
+async function handleTopologyReady(room, session, data) {
+  if (!room.pendingRoute || Number(data.epoch) !== room.pendingRoute.epoch)
+    return;
+  room.transitionReadiness.add(session.peerId);
+  await room.maybeCommitPendingRoute();
+}
+
+async function handleCloudflarePublication(room, ws, session, data) {
+  if (!session.cloudflareSessionId || !data.trackName || !data.source) return;
+  const publication = {
+    sessionId: session.cloudflareSessionId,
+    trackName: data.trackName,
+    source: data.source,
+    userId: session.userId,
+    peerId: session.peerId,
+    closed: data.closed === true,
+  };
+  const publicationKey = `${session.peerId}:${data.source}`;
+  if (publication.closed) room.publishedSources.delete(publicationKey);
+  else room.publishedSources.set(publicationKey, publication);
+  void room.state.storage.put("publishedSources", [
+    ...room.publishedSources.values(),
+  ]);
+  for (const participant of room.participants.values())
+    if (participant.ws !== ws)
+      room.sendMessage(
+        participant.ws,
+        MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+        publication,
+      );
+}
+
+export async function verifyRoomTicket(room, ticket) {
+  if (!ticket || typeof ticket !== "string")
+    return { valid: false, error: "Missing ticket" };
+  try {
+    const claims = await verifyMediaTicket(ticket, room.env);
+    if (!claims.sub || !claims.deviceId || !claims.channelId)
+      return { valid: false, error: "Media ticket is missing required claims" };
+    if (!["auto", "direct"].includes(claims.connectionMode || "auto"))
+      return {
+        valid: false,
+        error: "Media ticket has an invalid connection mode",
+      };
+    return { valid: true, claims };
+  } catch (error) {
+    return { valid: false, error: error.message || "Invalid media ticket" };
+  }
+}

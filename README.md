@@ -71,9 +71,12 @@ go in the file — set them with `wrangler secret put`:
 | `MEDIA_CONTROL_ADMIN_TOKEN`      | secret | Authenticate registry and Durable Object admin calls             |
 | `CLOUDFLARE_REALTIME_APP_SECRET` | secret | Cloudflare Realtime API credential for Cloudflare SFU routes     |
 | `CLOUDFLARE_REALTIME_APP_ID`     | var    | Cloudflare Realtime application identifier                       |
+| `DSPEAK_SFU_ENABLED`             | var    | Set to `true` only when a self-hosted mediasoup SFU is deployed  |
+| `DSPEAK_SFU_SIGNALING_URL`       | var    | `ws:`/`wss:` signaling URL for the enabled self-hosted SFU       |
 | `MEDIA_CONTROL_ALLOWED_ORIGINS`  | var    | Optional comma-separated browser Origin allowlist                |
 | `MEDIA_CONTROL_ISSUER`           | var    | issuer claim, default `dspeak-media-control`                     |
 | `PROVIDER_TICKET_TTL_SECONDS`    | var    | provider ticket lifetime, `120`                                  |
+| `MEDIA_CONTROL_DEBUG`            | var    | Set to `true` for redacted control-plane debug events            |
 
 For local dev, create a `.dev.vars` file (gitignored) with the same keys:
 
@@ -101,6 +104,13 @@ npm run dev        # wrangler dev — starts at http://localhost:8787
 If you only have the public key but no private key locally, the worker still
 boots but media ticket verification will fail until `MEDIA_TICKET_PUBLIC_KEY`
 is set — that's expected.
+
+Self-hosted mediasoup is optional. Keep `DSPEAK_SFU_ENABLED=false` and leave
+`DSPEAK_SFU_SIGNALING_URL` empty when no `dspeak-sfu` instance is deployed.
+With that configuration the registry returns no self-hosted route and skips
+provider health probes and retry alarms. Set both values only after the SFU is
+reachable at the configured WebSocket URL. Cloudflare Realtime remains the
+control-plane provider when its credentials are configured.
 
 ## Deploy
 

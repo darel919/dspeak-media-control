@@ -15,6 +15,7 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   P2P_FAILED: "p2p-failed",
   PROVIDER_READY: "provider-ready",
   PROVIDER_FAILURE: "provider-failure",
+  PROVIDER_RECOVERING: "provider-recovering",
   TOPOLOGY_READY: "topology-ready",
   TOPOLOGY_FAILED: "topology-failed",
   CLOUDFLARE_REQUEST: "cloudflare-request",

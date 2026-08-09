@@ -1,5 +1,7 @@
 import { SFU_PROVIDER, MEDIA_ROUTE_KIND } from "./protocol.js";
 import { rankQoeCandidates } from "./qoe.ts";
+import { isSelfHostedMediasoupConfigured } from "./provider-config.ts";
+import { mediaDebug } from "./debug.ts";
 
 export class ProviderRegistryDO {
   constructor(state, env) {
@@ -36,6 +38,13 @@ export class ProviderRegistryDO {
   async handleRegister(request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
+    if (!isSelfHostedMediasoupConfigured(this.env))
+      return new Response(
+        JSON.stringify({
+          error: "Self-hosted mediasoup is disabled or unconfigured",
+        }),
+        { status: 503 },
+      );
     const data = await request.json();
     const { providerId, signalingUrl, healthUrl, region, priority = 10 } = data;
 
@@ -66,6 +75,8 @@ export class ProviderRegistryDO {
     });
 
     await this.persist();
+    await this.state.storage.setAlarm?.(Date.now() + 60_000);
+    mediaDebug(this.env, "registry.provider-registered", { providerId });
     return new Response(JSON.stringify({ success: true }));
   }
 
@@ -87,6 +98,13 @@ export class ProviderRegistryDO {
   async handleSelect(request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
+    if (!isSelfHostedMediasoupConfigured(this.env))
+      return new Response(
+        JSON.stringify({
+          error: "Self-hosted mediasoup is disabled or unconfigured",
+        }),
+        { status: 503 },
+      );
     const data = await request.json();
     const {
       roomId,
@@ -265,6 +283,13 @@ export class ProviderRegistryDO {
   }
 
   async alarm() {
+    if (!isSelfHostedMediasoupConfigured(this.env)) {
+      await this.state.storage.deleteAlarm?.();
+      mediaDebug(this.env, "registry.probe-skipped", {
+        reason: "self-hosted-mediasoup-disabled",
+      });
+      return;
+    }
     for (const [id, provider] of this.providers) {
       try {
         const response = await fetch(provider.healthUrl, {
@@ -286,6 +311,9 @@ export class ProviderRegistryDO {
         provider.recoveringSince = null;
       }
     }
+    mediaDebug(this.env, "registry.probe-complete", {
+      providers: this.providers.size,
+    });
     await this.persist();
 
     this.state.storage.setAlarm(Date.now() + 60000);

@@ -17,7 +17,9 @@ class_name = "ProviderRegistryDO"
 [vars]
 MEDIA_CONTROL_ISSUER = "dspeak-media-control"
 PROVIDER_TICKET_TTL_SECONDS = "120"
-DSPEAK_SFU_SIGNALING_URL = "wss://sfu.example.com/v1/ws"
+MEDIA_CONTROL_DEBUG = "false"
+DSPEAK_SFU_ENABLED = "false"
+DSPEAK_SFU_SIGNALING_URL = ""
 CLOUDFLARE_REALTIME_APP_ID = "59759088ce5e004e5c70411ac799980b"
 
 [exports.MediaRoomDO]
