@@ -31,7 +31,7 @@ MediaRoomDO            ProviderRegistryDO
 
 ## Prerequisites
 
-- Node.js >= 18
+- Node.js >= 22
 - Cloudflare account, logged in via `wrangler login`
 - The two Durable Object classes are registered in `wrangler.toml` (already done)
 
@@ -73,7 +73,7 @@ go in the file — set them with `wrangler secret put`:
 | `MEDIA_TICKET_TTL_SECONDS`    | var    | media ticket lifetime, `120`                                     |
 | `PROVIDER_TICKET_TTL_SECONDS` | var    | provider ticket lifetime, `120`                                  |
 
-For local dev, crate a `.dev.vars` file (gitignored) with the same keys:
+For local dev, create a `.dev.vars` file (gitignored) with the same keys:
 
 ```bash
 cp .env.example .dev.vars

@@ -15,8 +15,11 @@ import {
   createSFURoute,
   validateRouteForMode,
   compareRouteEpoch,
+  chooseAvailableProvider,
+  checkP2PEligibility,
 } from "./protocol.js";
 import { verifyMediaTicket } from "./tickets.js";
+import { normalizeQoePath, qoeWouldImprove, rankQoeCandidates } from "./qoe.ts";
 
 const P2P_QUALIFICATION_STABILITY_MS = 2_000;
 
@@ -35,6 +38,8 @@ export class MediaRoomDO {
     this.transitionReadiness = new Set();
     this.publishedSources = new Map();
     this.providerHealth = new Map();
+    this.qoeMetrics = new Map();
+    this.providerConfig = null;
     this.sourceRevision = 0;
     this.epoch = 0;
     this.transitionGeneration = 0;
@@ -337,13 +342,49 @@ export class MediaRoomDO {
             ...(data.qualifiedPeerIds || data.qualifiedPeers || []),
           ];
           ws.serializeAttachment(session);
+          this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED, {
+            epoch: this.epoch,
+            acknowledged: true,
+            qualifiedPeerIds: [
+              ...this.qualificationState.get(session.peerId).qualifiedPeers,
+            ],
+          });
           this.checkQualificationComplete();
         }
         break;
       }
 
       case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED: {
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED, {
+          epoch: Number(data.epoch) || this.epoch,
+          acknowledged: true,
+          failed: true,
+          reason: data.reason || "p2p-failed",
+        });
         this.handleP2PFailure(session, data.reason);
+        break;
+      }
+
+      case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_QOE: {
+        const participant = this.participants.get(
+          `${session.userId}:${session.deviceId}`,
+        );
+        if (participant && Array.isArray(data.paths)) {
+          const provider = String(data.provider || "");
+          const key = participant.peerId;
+          const previous = this.qoeMetrics.get(key);
+          this.qoeMetrics.set(key, {
+            provider,
+            paths: data.paths
+              .slice(0, 32)
+              .map((path) => normalizeQoePath(path)),
+            sampledAt: Number(data.sampledAt) || Date.now(),
+            stableSince:
+              previous?.provider === provider
+                ? previous.stableSince
+                : Date.now(),
+          });
+        }
         break;
       }
 
@@ -356,6 +397,15 @@ export class MediaRoomDO {
           this.providerReadiness.add(session.peerId);
           session.providerReadyEpoch = Number(data.epoch);
           ws.serializeAttachment(session);
+          this.providerHealth.set(data.provider, {
+            healthy: true,
+            epoch: Number(data.epoch),
+            updatedAt: Date.now(),
+          });
+          void this.state.storage.put(
+            "providerHealth",
+            Object.fromEntries(this.providerHealth),
+          );
           const expected = new Set(
             [...this.participants.values()].map((entry) => entry.peerId),
           );
@@ -576,6 +626,8 @@ export class MediaRoomDO {
       publishedSources,
       qualifiedParticipantSignature,
       qualificationStartedAt,
+      providerConfig,
+      providerHealth,
     ] = await Promise.all([
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
@@ -585,6 +637,8 @@ export class MediaRoomDO {
       this.state.storage.get("publishedSources"),
       this.state.storage.get("qualifiedParticipantSignature"),
       this.state.storage.get("qualificationStartedAt"),
+      this.state.storage.get("providerConfig"),
+      this.state.storage.get("providerHealth"),
     ]);
     if (route) this.route = route;
     if (Number.isSafeInteger(epoch)) this.epoch = epoch;
@@ -604,6 +658,10 @@ export class MediaRoomDO {
       this.qualifiedParticipantSignature = qualifiedParticipantSignature;
     if (Number.isSafeInteger(qualificationStartedAt))
       this.qualificationStartedAt = qualificationStartedAt;
+    if (providerConfig && typeof providerConfig === "object")
+      this.providerConfig = providerConfig;
+    if (providerHealth && typeof providerHealth === "object")
+      this.providerHealth = new Map(Object.entries(providerHealth));
     this.stateLoaded = true;
     for (const ws of this.state.getWebSockets?.() || []) this.getSession(ws);
   }
@@ -707,6 +765,27 @@ export class MediaRoomDO {
   }
 
   async handleProviderFailure(provider, reason) {
+    const epoch = this.pendingRoute?.epoch || this.route.epoch;
+    this.providerHealth.set(provider, {
+      healthy: false,
+      reason,
+      epoch,
+      updatedAt: Date.now(),
+    });
+    await this.state.storage.put(
+      "providerHealth",
+      Object.fromEntries(this.providerHealth),
+    );
+    for (const participant of this.participants.values())
+      this.sendMessage(
+        participant.ws,
+        MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE,
+        {
+          provider,
+          epoch,
+          reason,
+        },
+      );
     const registryNamespace = this.env.PROVIDER_REGISTRY_DO;
     if (registryNamespace) {
       const registryId = registryNamespace.idFromName("global");
@@ -758,18 +837,24 @@ export class MediaRoomDO {
       ),
     );
     const connectionMode = this.getConnectionMode();
-    const maxP2pParticipants = hasVideo
-      ? 4
-      : connectionMode === "direct"
-        ? 12
-        : 8;
-    if (participantCount > maxP2pParticipants) {
+    const eligibility = checkP2PEligibility({
+      connectionMode,
+      participantCount,
+      hasVideo,
+      requiredSources: [...this.publishedSources.values()].map(
+        (source) => source.source,
+      ),
+    });
+    if (!eligibility.eligible) {
       if (connectionMode === "direct") {
         const latest = [...this.sessions.values()].find(
           (session) => session.authenticated,
         );
         this.sendMessage(latest?.ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
-          code: "DIRECT_PARTICIPANT_LIMIT_EXCEEDED",
+          code:
+            eligibility.reason === "server-source-requires-auto-mode"
+              ? "DIRECT_MEDIA_UNAVAILABLE"
+              : "DIRECT_PARTICIPANT_LIMIT_EXCEEDED",
           error: "Direct mode supports fewer participants for this media mix",
         });
         return;
@@ -898,6 +983,29 @@ export class MediaRoomDO {
         );
         return;
       }
+      const candidateReports = [...this.qualificationState.values()].flatMap(
+        (state) => state.candidateReports || [],
+      );
+      const p2pCandidate = rankQoeCandidates([
+        {
+          provider: "p2p",
+          paths: candidateReports,
+          stableSince: this.qualificationStartedAt,
+        },
+      ])[0];
+      const activeProvider =
+        this.route.kind === MEDIA_ROUTE_KIND.SFU ? this.route.provider : null;
+      const activeCandidate = rankQoeCandidates(this.getQoeCandidates()).find(
+        (candidate) => candidate.provider === activeProvider,
+      );
+      if (
+        activeCandidate &&
+        (!p2pCandidate.paths.every((path) => path.rttMs != null) ||
+          !qoeWouldImprove(activeCandidate, p2pCandidate, Date.now()))
+      ) {
+        void this.state.storage.setAlarm?.(Date.now() + 1_000);
+        return;
+      }
       this.commitRoute(
         createP2PRoute(
           P2P_PATH.DIRECT,
@@ -913,6 +1021,8 @@ export class MediaRoomDO {
     if (this.pendingRoute || this.transitionInFlight) return;
     this.transitionInFlight = true;
     let selectedProvider = targetProvider;
+    let selectedProviderConfig = null;
+    let registrySelectionSucceeded = false;
     const registryNamespace = this.env.PROVIDER_REGISTRY_DO;
     if (registryNamespace) {
       try {
@@ -936,24 +1046,42 @@ export class MediaRoomDO {
               ),
               requiredSources: [],
               excludedProvider,
+              qoeCandidates: this.getQoeCandidates(),
             }),
           }),
         );
         if (response.ok) {
           const selection = await response.json();
           selectedProvider = selection.route?.provider || selectedProvider;
+          selectedProviderConfig = selection.provider || null;
+          registrySelectionSucceeded = true;
         }
       } catch {}
     }
-    const supportedProviders = this.getCommonProviderCapabilities();
-    if (!supportedProviders.has(selectedProvider)) {
-      const alternateProvider =
-        selectedProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME
-          ? SFU_PROVIDER.MEDIASOUP
-          : SFU_PROVIDER.CLOUDFLARE_REALTIME;
-      if (supportedProviders.has(alternateProvider))
-        selectedProvider = alternateProvider;
+    const availableProviders = this.getCommonProviderCapabilities();
+    if (
+      !registrySelectionSucceeded &&
+      selectedProvider === SFU_PROVIDER.MEDIASOUP
+    )
+      availableProviders.delete(SFU_PROVIDER.MEDIASOUP);
+    selectedProvider = chooseAvailableProvider({
+      requestedProvider: selectedProvider,
+      availableProviders,
+      excludedProvider,
+      registrySelectionSucceeded,
+    });
+    if (!selectedProvider) {
+      this.transitionInFlight = false;
+      for (const participant of this.participants.values())
+        this.sendMessage(participant.ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "MEDIA_PROVIDER_UNAVAILABLE",
+          error: "No eligible media provider is available; recovering media",
+          reason,
+        });
+      return;
     }
+    this.providerConfig = selectedProviderConfig;
+    void this.state.storage.put("providerConfig", this.providerConfig);
     const targetRoute =
       selectedProvider === SFU_PROVIDER.MEDIASOUP
         ? createSFURoute(
@@ -1005,6 +1133,40 @@ export class MediaRoomDO {
     );
   }
 
+  getQoeCandidates() {
+    const grouped = new Map();
+    for (const report of this.qoeMetrics.values()) {
+      const provider =
+        report.provider === "sfu"
+          ? this.route.provider || SFU_PROVIDER.CLOUDFLARE_REALTIME
+          : report.provider;
+      if (
+        ![
+          "p2p",
+          SFU_PROVIDER.CLOUDFLARE_REALTIME,
+          SFU_PROVIDER.MEDIASOUP,
+        ].includes(provider)
+      )
+        continue;
+      const candidate = grouped.get(provider) || {
+        id: provider,
+        provider,
+        paths: [],
+        readyParticipants: 0,
+        requiredParticipants: this.participants.size,
+        stableSince: report.stableSince,
+      };
+      candidate.paths.push(...report.paths);
+      candidate.readyParticipants += 1;
+      candidate.stableSince = Math.min(
+        candidate.stableSince || report.stableSince,
+        report.stableSince,
+      );
+      grouped.set(provider, candidate);
+    }
+    return [...grouped.values()];
+  }
+
   async issueProviderTickets(route) {
     await Promise.all(
       [...this.participants.values()]
@@ -1015,7 +1177,11 @@ export class MediaRoomDO {
 
   async issueProviderTicket(participant, route) {
     if (route.provider !== SFU_PROVIDER.MEDIASOUP) return;
-    const ticket = await this.createProviderTicket(participant, route);
+    const ticket = await this.createProviderTicket(
+      participant,
+      route,
+      this.providerConfig,
+    );
     this.sendMessage(
       participant.ws,
       MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_TICKET,
@@ -1023,13 +1189,15 @@ export class MediaRoomDO {
         route,
         provider: route.provider,
         epoch: route.epoch,
-        signalingUrl: this.env.DSPEAK_SFU_SIGNALING_URL,
+        signalingUrl:
+          this.providerConfig?.signalingUrl ||
+          this.env.DSPEAK_SFU_SIGNALING_URL,
         ticket,
       },
     );
   }
 
-  async createProviderTicket(participant, route) {
+  async createProviderTicket(participant, route, providerConfig = null) {
     const { signProviderTicket } = await import("./tickets.js");
     const claims = {
       iss: this.env.MEDIA_CONTROL_ISSUER,
@@ -1038,7 +1206,10 @@ export class MediaRoomDO {
       deviceId: participant.deviceId,
       roomId: participant.channelId,
       routeEpoch: route.epoch,
-      providerId: "selfhost-primary",
+      providerId:
+        providerConfig?.id ||
+        this.env.DSPEAK_SFU_PROVIDER_ID ||
+        "selfhost-primary",
       generation: 1,
       permissions: { produce: true, consume: true },
       iat: Math.floor(Date.now() / 1000),
@@ -1084,6 +1255,22 @@ export class MediaRoomDO {
     ]);
 
     this.broadcastTopology();
+    for (const [ws, session] of this.sessions)
+      if (session.authenticated && ws.readyState === WebSocket.OPEN)
+        this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ROUTE_COMMIT, {
+          route,
+          mode:
+            route.kind === MEDIA_ROUTE_KIND.P2P
+              ? "p2p"
+              : route.kind === MEDIA_ROUTE_KIND.SFU
+                ? "sfu"
+                : "idle",
+          provider: route.provider,
+          epoch: route.epoch,
+          sourceRevision: route.sourceRevision,
+          participants: this.getParticipantList(),
+          peers: this.getParticipantList(),
+        });
   }
 
   broadcastTopology() {

@@ -1,4 +1,5 @@
 import { SFU_PROVIDER, MEDIA_ROUTE_KIND } from "./protocol.js";
+import { rankQoeCandidates } from "./qoe.ts";
 
 export class ProviderRegistryDO {
   constructor(state, env) {
@@ -94,6 +95,7 @@ export class ProviderRegistryDO {
       hasVideo,
       requiredSources,
       excludedProvider,
+      qoeCandidates = [],
     } = data;
 
     let candidates = [...this.providers.values()].filter((p) => p.healthy);
@@ -130,12 +132,39 @@ export class ProviderRegistryDO {
       );
     }
 
-    if (participantCount <= 4 && !hasVideo) {
-      return new Response(
-        JSON.stringify({
-          route: { kind: MEDIA_ROUTE_KIND.P2P, path: "direct" },
-        }),
+    const rankedQoe = rankQoeCandidates(
+      qoeCandidates.filter(
+        (candidate) =>
+          Number(candidate.readyParticipants) >=
+            Number(candidate.requiredParticipants) &&
+          candidate.paths?.length > 0 &&
+          candidate.paths.every((path) =>
+            Number.isFinite(Number(path.rttMs)),
+          ) &&
+          candidates.some((provider) =>
+            candidate.provider === SFU_PROVIDER.CLOUDFLARE_REALTIME
+              ? provider.id.includes("cloudflare")
+              : (provider.id.includes("mediasoup") ||
+                  provider.id.includes("selfhost")) &&
+                candidate.provider === SFU_PROVIDER.MEDIASOUP,
+          ),
+      ),
+    );
+    const qoeProvider = rankedQoe[0]?.provider;
+    if (qoeProvider) {
+      const provider = candidates.find((candidate) =>
+        qoeProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME
+          ? candidate.id.includes("cloudflare")
+          : candidate.id.includes("mediasoup") ||
+            candidate.id.includes("selfhost"),
       );
+      if (provider)
+        return new Response(
+          JSON.stringify({
+            route: { kind: MEDIA_ROUTE_KIND.SFU, provider: qoeProvider },
+            provider,
+          }),
+        );
     }
 
     const cfProvider = candidates.find((p) => p.id.includes("cloudflare"));

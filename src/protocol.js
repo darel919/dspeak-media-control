@@ -19,6 +19,7 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   TOPOLOGY_FAILED: "topology-failed",
   CLOUDFLARE_REQUEST: "cloudflare-request",
   CLOUDFLARE_PUBLICATION: "cloudflare-publication",
+  MEDIA_QOE: "media-qoe",
   HEARTBEAT: "heartbeat",
   RESUME: "resume",
 
@@ -62,6 +63,37 @@ export const SFU_PROVIDER = {
 
 export const CONTROL_HEARTBEAT_INTERVAL_MS = 30000;
 export const CONTROL_HEARTBEAT_TIMEOUT_MS = 90000;
+
+export const P2P_PARTICIPANT_LIMITS = {
+  directAudio: 12,
+  directVideo: 4,
+  autoAudio: 8,
+  autoVideo: 4,
+};
+
+export function checkP2PEligibility({
+  connectionMode,
+  participantCount,
+  hasVideo,
+  requiredSources = [],
+}) {
+  const limit =
+    connectionMode === "direct"
+      ? hasVideo
+        ? P2P_PARTICIPANT_LIMITS.directVideo
+        : P2P_PARTICIPANT_LIMITS.directAudio
+      : hasVideo
+        ? P2P_PARTICIPANT_LIMITS.autoVideo
+        : P2P_PARTICIPANT_LIMITS.autoAudio;
+  if (participantCount > limit)
+    return {
+      eligible: false,
+      reason: `participant-count-${participantCount}-exceeds-${limit}`,
+    };
+  if (connectionMode === "direct" && requiredSources.includes("server-dj"))
+    return { eligible: false, reason: "server-source-requires-auto-mode" };
+  return { eligible: true };
+}
 
 export function createLocalRoute(epoch, sourceRevision, reason) {
   return {
@@ -110,4 +142,26 @@ export function compareRouteEpoch(a, b) {
   if (a.sourceRevision !== b.sourceRevision)
     return a.sourceRevision < b.sourceRevision ? -1 : 1;
   return 0;
+}
+
+export function chooseAvailableProvider({
+  requestedProvider,
+  availableProviders = [],
+  excludedProvider = null,
+  registrySelectionSucceeded = false,
+}) {
+  const available = new Set(availableProviders);
+  if (excludedProvider) available.delete(excludedProvider);
+  if (
+    !registrySelectionSucceeded &&
+    requestedProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME &&
+    !available.has(SFU_PROVIDER.CLOUDFLARE_REALTIME)
+  )
+    return null;
+  if (requestedProvider && available.has(requestedProvider))
+    return requestedProvider;
+  if (available.has(SFU_PROVIDER.CLOUDFLARE_REALTIME))
+    return SFU_PROVIDER.CLOUDFLARE_REALTIME;
+  if (available.has(SFU_PROVIDER.MEDIASOUP)) return SFU_PROVIDER.MEDIASOUP;
+  return null;
 }

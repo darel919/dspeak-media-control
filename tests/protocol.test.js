@@ -77,4 +77,40 @@ describe("dspeak-media-control protocol", () => {
     assert.strictEqual(compareRouteEpoch(route3, route4), -1);
     assert.strictEqual(compareRouteEpoch(route4, route3), 1);
   });
+
+  it("does not invent an unavailable fallback provider", async () => {
+    const { chooseAvailableProvider, SFU_PROVIDER } =
+      await import("../src/protocol.js");
+
+    assert.equal(
+      chooseAvailableProvider({
+        requestedProvider: SFU_PROVIDER.MEDIASOUP,
+        availableProviders: [SFU_PROVIDER.CLOUDFLARE_REALTIME],
+        excludedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+      }),
+      null,
+    );
+    assert.equal(
+      chooseAvailableProvider({
+        requestedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        availableProviders: [SFU_PROVIDER.CLOUDFLARE_REALTIME],
+      }),
+      SFU_PROVIDER.CLOUDFLARE_REALTIME,
+    );
+    assert.equal(
+      chooseAvailableProvider({
+        requestedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        availableProviders: [SFU_PROVIDER.MEDIASOUP],
+      }),
+      null,
+    );
+    assert.equal(
+      chooseAvailableProvider({
+        requestedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        availableProviders: [SFU_PROVIDER.MEDIASOUP],
+        registrySelectionSucceeded: true,
+      }),
+      SFU_PROVIDER.MEDIASOUP,
+    );
+  });
 });
