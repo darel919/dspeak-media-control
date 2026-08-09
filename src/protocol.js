@@ -21,6 +21,7 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   CLOUDFLARE_REQUEST: "cloudflare-request",
   CLOUDFLARE_PUBLICATION: "cloudflare-publication",
   MEDIA_QOE: "media-qoe",
+  CLIENT_SFU_RTT: "client-sfu-rtt",
   HEARTBEAT: "heartbeat",
   RESUME: "resume",
 
@@ -33,6 +34,7 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   PROVIDER_TICKET: "provider-ticket",
   CLOUDFLARE_RESPONSE: "cloudflare-response",
   CLOUDFLARE_PUBLICATION_AVAILABLE: "cloudflare-publication-available",
+  PARTICIPANT_SFU_RTT: "participant-sfu-rtt",
 };
 
 export const ROOM_STATE = {

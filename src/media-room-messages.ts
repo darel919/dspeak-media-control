@@ -118,6 +118,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       });
       break;
     }
+    case MEDIA_CONTROL_MESSAGE_TYPES.CLIENT_SFU_RTT:
+      relayClientSfuRtt(room, ws, session, data);
+      break;
     case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY:
       await handleProviderReady(room, ws, session, data);
       break;
@@ -168,6 +171,26 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
         error: `Unknown message type: ${type}`,
       });
+  }
+}
+
+function relayClientSfuRtt(room, ws, session, data) {
+  const rttMs = Number(data.rttMs);
+  if (!Number.isFinite(rttMs) || rttMs < 0) return;
+  const participant = room.participants.get(
+    `${session.userId}:${session.deviceId}`,
+  );
+  if (!participant) return;
+  for (const recipient of room.participants.values()) {
+    if (!recipient.ws || recipient.ws === ws) continue;
+    room.sendMessage(
+      recipient.ws,
+      MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_SFU_RTT,
+      {
+        userId: session.userId,
+        rttMs,
+      },
+    );
   }
 }
 
