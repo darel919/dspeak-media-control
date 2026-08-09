@@ -22,6 +22,36 @@ import { verifyMediaTicket } from "./tickets.js";
 import { normalizeQoePath, qoeWouldImprove, rankQoeCandidates } from "./qoe.ts";
 
 const P2P_QUALIFICATION_STABILITY_MS = 2_000;
+const PROVIDER_FAILURE_COOLDOWN_MS = 30_000;
+const MAX_CONTROL_MESSAGE_BYTES = 96 * 1024;
+const MAX_MEDIA_SOURCES = 8;
+const MAX_MEDIA_SOURCE_LENGTH = 32;
+
+export function controlMessageByteLength(message) {
+  if (typeof message === "string")
+    return new TextEncoder().encode(message).byteLength;
+  return Number(message?.byteLength) || 0;
+}
+
+export function normalizeMediaSources(value) {
+  if (!Array.isArray(value) || value.length > MAX_MEDIA_SOURCES) return null;
+  const sources = [];
+  const seen = new Set();
+  for (const source of value) {
+    if (
+      typeof source !== "string" ||
+      source.length === 0 ||
+      source.length > MAX_MEDIA_SOURCE_LENGTH ||
+      !/^[a-z][a-z0-9-]*$/.test(source)
+    )
+      return null;
+    if (!seen.has(source)) {
+      seen.add(source);
+      sources.push(source);
+    }
+  }
+  return sources;
+}
 
 export class MediaRoomDO {
   constructor(state, env) {
@@ -57,6 +87,8 @@ export class MediaRoomDO {
     await this.loadDurableState();
 
     if (request.headers.get("Upgrade") === "websocket") {
+      if (!this.isAllowedWebSocketOrigin(request))
+        return new Response("WebSocket origin is not allowed", { status: 403 });
       const [client, server] = Object.values(new WebSocketPair());
       this.handleWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
@@ -90,6 +122,17 @@ export class MediaRoomDO {
     return Boolean(
       expected && request.headers.get("authorization") === `Bearer ${expected}`,
     );
+  }
+
+  isAllowedWebSocketOrigin(request) {
+    const origin = request.headers.get("Origin");
+    if (!origin) return true;
+    const configured = String(this.env.MEDIA_CONTROL_ALLOWED_ORIGINS || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!configured.length) return true;
+    return configured.includes(origin);
   }
 
   handleWebSocket(ws) {
@@ -130,6 +173,14 @@ export class MediaRoomDO {
   }
 
   async webSocketMessage(ws, message) {
+    if (controlMessageByteLength(message) > MAX_CONTROL_MESSAGE_BYTES) {
+      this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+        code: "MEDIA_MESSAGE_TOO_LARGE",
+        error: "Media control message exceeds the allowed size",
+      });
+      ws.close(1009, "Media control message too large");
+      return;
+    }
     await this.loadDurableState();
     const session = this.getSession(ws);
     try {
@@ -314,7 +365,15 @@ export class MediaRoomDO {
         const participantKey = `${session.userId}:${session.deviceId}`;
         const participant = this.participants.get(participantKey);
         if (participant) {
-          participant.sources = new Set(data.sources || []);
+          const sources = normalizeMediaSources(data.sources);
+          if (!sources) {
+            this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+              code: "INVALID_MEDIA_SOURCES",
+              error: "Media source identifiers are invalid",
+            });
+            break;
+          }
+          participant.sources = new Set(sources);
           session.sources = [...participant.sources];
           ws.serializeAttachment(session);
           this.maybeStartQualification();
@@ -400,6 +459,7 @@ export class MediaRoomDO {
           this.providerHealth.set(data.provider, {
             healthy: true,
             epoch: Number(data.epoch),
+            unhealthyUntil: 0,
             updatedAt: Date.now(),
           });
           void this.state.storage.put(
@@ -770,6 +830,7 @@ export class MediaRoomDO {
       healthy: false,
       reason,
       epoch,
+      unhealthyUntil: Date.now() + PROVIDER_FAILURE_COOLDOWN_MS,
       updatedAt: Date.now(),
     });
     await this.state.storage.put(
@@ -1058,7 +1119,7 @@ export class MediaRoomDO {
         }
       } catch {}
     }
-    const availableProviders = this.getCommonProviderCapabilities();
+    const availableProviders = this.getAvailableProviderCapabilities();
     if (
       !registrySelectionSucceeded &&
       selectedProvider === SFU_PROVIDER.MEDIASOUP
@@ -1112,7 +1173,16 @@ export class MediaRoomDO {
 
     this.broadcastTopology();
 
-    this.issueProviderTickets(targetRoute);
+    try {
+      await this.issueProviderTickets(targetRoute);
+    } catch (error) {
+      this.transitionInFlight = false;
+      await this.handleProviderFailure(
+        selectedProvider,
+        `provider-ticket-${error?.message || "failed"}`,
+      );
+      return;
+    }
     this.transitionInFlight = false;
   }
 
@@ -1131,6 +1201,17 @@ export class MediaRoomDO {
           ),
       ),
     );
+  }
+
+  getAvailableProviderCapabilities() {
+    const available = this.getCommonProviderCapabilities();
+    const now = Date.now();
+    for (const provider of available) {
+      const health = this.providerHealth.get(provider);
+      if (health?.healthy === false && Number(health.unhealthyUntil) > now)
+        available.delete(provider);
+    }
+    return available;
   }
 
   getQoeCandidates() {

@@ -48,12 +48,15 @@ key — not the media-ticket public key. Legacy naming; the comment in
 
 ## Env reference
 
-| Var                           | Required | Used by      | Purpose                                         |
-| ----------------------------- | -------- | ------------ | ----------------------------------------------- |
-| `MEDIA_TICKET_PUBLIC_KEY`     | yes      | `tickets.js` | verify media tickets from dspeak                |
-| `PROVIDER_TICKET_PRIVATE_KEY` | yes      | `tickets.js` | sign provider tickets for dspeak-sfu            |
-| `MEDIA_CONTROL_ISSUER`        | no       | `tickets.js` | expected issuer; default `dspeak-media-control` |
-| `PROVIDER_TICKET_TTL_SECONDS` | no       | `tickets.js` | provider ticket TTL; default 120                |
+| Var                              | Required                  | Used by      | Purpose                                         |
+| -------------------------------- | ------------------------- | ------------ | ----------------------------------------------- |
+| `MEDIA_TICKET_PUBLIC_KEY`        | yes                       | `tickets.js` | verify media tickets from dspeak                |
+| `PROVIDER_TICKET_PRIVATE_KEY`    | yes                       | `tickets.js` | sign provider tickets for dspeak-sfu            |
+| `MEDIA_CONTROL_ADMIN_TOKEN`      | yes                       | registry/DO  | authenticate provider and admin calls           |
+| `CLOUDFLARE_REALTIME_APP_SECRET` | yes for Cloudflare routes | MediaRoomDO  | call Cloudflare Realtime APIs                   |
+| `CLOUDFLARE_REALTIME_APP_ID`     | yes for Cloudflare routes | MediaRoomDO  | identify the Realtime application               |
+| `MEDIA_CONTROL_ISSUER`           | no                        | `tickets.js` | expected issuer; default `dspeak-media-control` |
+| `PROVIDER_TICKET_TTL_SECONDS`    | no                        | `tickets.js` | provider ticket TTL; default 120                |
 
 Everything else that used to be listed (Supabase, R2, `MEDIA_CONTROL_DOMAIN`,
 `PROTOCOL_VERSION`, `MEDIA_TICKET_TTL_SECONDS`, `PROVIDER_TICKET_PUBLIC_KEY`)

@@ -64,14 +64,16 @@ base64 -i provider-ticket-public.pem    # -> share with dspeak-sfu
 All vars can live in `wrangler.toml` (`[vars]`) or as secrets. Secrets never
 go in the file — set them with `wrangler secret put`:
 
-| Variable                      | Type   | Purpose                                                          |
-| ----------------------------- | ------ | ---------------------------------------------------------------- |
-| `MEDIA_TICKET_PUBLIC_KEY`     | secret | Ed25519 public key used to verify media tickets signed by dspeak |
-| `PROVIDER_TICKET_PRIVATE_KEY` | secret | Ed25519 private key used to sign provider tickets for dspeak-sfu |
-| `PROVIDER_TICKET_PUBLIC_KEY`  | secret | Ed25519 public key shared with dspeak-sfu for verification       |
-| `MEDIA_CONTROL_ISSUER`        | var    | issuer claim, default `dspeak-media-control`                     |
-| `MEDIA_TICKET_TTL_SECONDS`    | var    | media ticket lifetime, `120`                                     |
-| `PROVIDER_TICKET_TTL_SECONDS` | var    | provider ticket lifetime, `120`                                  |
+| Variable                         | Type   | Purpose                                                          |
+| -------------------------------- | ------ | ---------------------------------------------------------------- |
+| `MEDIA_TICKET_PUBLIC_KEY`        | secret | Ed25519 public key used to verify media tickets signed by dspeak |
+| `PROVIDER_TICKET_PRIVATE_KEY`    | secret | Ed25519 private key used to sign provider tickets for dspeak-sfu |
+| `MEDIA_CONTROL_ADMIN_TOKEN`      | secret | Authenticate registry and Durable Object admin calls             |
+| `CLOUDFLARE_REALTIME_APP_SECRET` | secret | Cloudflare Realtime API credential for Cloudflare SFU routes     |
+| `CLOUDFLARE_REALTIME_APP_ID`     | var    | Cloudflare Realtime application identifier                       |
+| `MEDIA_CONTROL_ALLOWED_ORIGINS`  | var    | Optional comma-separated browser Origin allowlist                |
+| `MEDIA_CONTROL_ISSUER`           | var    | issuer claim, default `dspeak-media-control`                     |
+| `PROVIDER_TICKET_TTL_SECONDS`    | var    | provider ticket lifetime, `120`                                  |
 
 For local dev, create a `.dev.vars` file (gitignored) with the same keys:
 
@@ -85,7 +87,8 @@ cp .env.example .dev.vars
 ```bash
 wrangler secret put MEDIA_TICKET_PUBLIC_KEY
 wrangler secret put PROVIDER_TICKET_PRIVATE_KEY
-wrangler secret put PROVIDER_TICKET_PUBLIC_KEY
+wrangler secret put MEDIA_CONTROL_ADMIN_TOKEN
+wrangler secret put CLOUDFLARE_REALTIME_APP_SECRET
 ```
 
 ## Run locally
@@ -119,7 +122,6 @@ warning: wrangler secret put with --env requires `wrangler.toml` env config
 | ------------------------------ | ------------------------------------ |
 | `GET /healthz`                 | Worker liveness                      |
 | `WS /media-control/:channelId` | Upgrade to `MediaRoomDO(channelId)`  |
-| `POST /media-bootstrap`        | (removed — see below)                |
 | `POST /registry/register`      | Register a provider (admin only)     |
 | `POST /registry/select`        | Select a route (internal/admin only) |
 | `GET /registry/health`         | Inspect providers (admin only)       |
@@ -131,6 +133,10 @@ ticket first (see `src/protocol.js` for message constants / route model).
 
 Protocol version: **919** — hello handshake family (`hello919`, `hi919`), same
 as the media signaling protocol in the main app.
+
+The mediasoup fallback is available only when a healthy `dspeak-sfu` instance
+is registered at `/registry/register`. Cloudflare Realtime does not use a
+provider ticket; its credentials remain Worker secrets.
 
 ## Tests
 

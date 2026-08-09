@@ -111,10 +111,11 @@ export class ProviderRegistryDO {
 
     candidates = candidates.filter((p) => {
       const cb = this.circuitBreakers.get(p.id);
+      const now = Date.now();
       return (
         !cb ||
-        cb.state !== "open" ||
-        (cb.state === "half-open" && Date.now() >= cb.nextAttempt)
+        cb.state === "closed" ||
+        (cb.state === "half-open" && now >= cb.nextAttempt)
       );
     });
     candidates = candidates.filter((provider) => {

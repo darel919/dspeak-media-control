@@ -21,26 +21,29 @@ See `.env.example` for the full variable list and `wrangler.toml` for bindings.
 
 ## Key model
 
-| Variable                      | Purpose                                                          |
-| ----------------------------- | ---------------------------------------------------------------- |
-| `MEDIA_TICKET_PUBLIC_KEY`     | Verify media tickets issued by the dSpeak server (Vercel signs). |
-| `PROVIDER_TICKET_PRIVATE_KEY` | Sign provider tickets consumed by dSpeak-SFU.                    |
-| `PROVIDER_TICKET_PUBLIC_KEY`  | Matching public key, shared with dSpeak-SFU.                     |
+| Variable                         | Purpose                                                          |
+| -------------------------------- | ---------------------------------------------------------------- |
+| `MEDIA_TICKET_PUBLIC_KEY`        | Verify media tickets issued by the dSpeak server (Vercel signs). |
+| `PROVIDER_TICKET_PRIVATE_KEY`    | Sign provider tickets consumed by dSpeak-SFU.                    |
+| `MEDIA_CONTROL_ADMIN_TOKEN`      | Authenticate registry and Durable Object admin calls.            |
+| `CLOUDFLARE_REALTIME_APP_ID`     | Cloudflare Realtime application identifier.                      |
+| `CLOUDFLARE_REALTIME_APP_SECRET` | Cloudflare Realtime API credential.                              |
+| `MEDIA_CONTROL_ALLOWED_ORIGINS`  | Optional browser Origin allowlist for WebSockets.                |
 
 ## Control surface
 
-| Endpoint                                 | Purpose                             |
-| ---------------------------------------- | ----------------------------------- |
-| `GET /healthz`                           | Worker liveness                     |
-| `WS /media-control/:channelId`           | Upgrade to `MediaRoomDO(channelId)` |
-| `POST /provider-registry/register`       | Register a provider instance        |
-| `GET /provider-registry/health`          | Provider health + circuit breakers  |
-| `POST /provider-registry/select`         | Route selection for a room          |
-| `POST /provider-registry/report-failure` | Correlated failure reporting        |
+| Endpoint                        | Purpose                             |
+| ------------------------------- | ----------------------------------- |
+| `GET /healthz`                  | Worker liveness                     |
+| `WS /media-control/:channelId`  | Upgrade to `MediaRoomDO(channelId)` |
+| `POST /registry/register`       | Register a provider instance        |
+| `GET /registry/health`          | Provider health + circuit breakers  |
+| `POST /registry/select`         | Route selection for a room          |
+| `POST /registry/report-failure` | Correlated failure reporting        |
 
 ## WebSocket/media protocol
 
-See `src/protocol.js` for message types and route model. Protocol version is `2`.
+See `src/protocol.js` for message types and route model. Protocol version is `919`.
 
 ## Development
 
