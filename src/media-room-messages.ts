@@ -30,6 +30,13 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     await authenticateRoomSession(room, ws, session, type, data, now);
     return;
   }
+  if (
+    typeof room.isCurrentParticipantSession === "function" &&
+    !room.isCurrentParticipantSession(ws, session)
+  ) {
+    ws.close(4000, "Media session superseded");
+    return;
+  }
 
   switch (type) {
     case MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT: {
@@ -40,7 +47,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_SIGNAL:
-      await room.relayP2PSignal(session, data);
+      await room.relayP2PSignal(session, data, ws);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY:
     case MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE:
@@ -58,16 +65,50 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         });
         break;
       }
+      const stalePublications = [];
+      const sourceSet = new Set(sources);
+      for (const [key, publication] of room.publishedSources) {
+        if (
+          publication.peerId === session.peerId &&
+          !sourceSet.has(publication.source)
+        ) {
+          room.publishedSources.delete(key);
+          stalePublications.push({ ...publication, closed: true });
+        }
+      }
       participant.sources = new Set(sources);
       session.sources = [...participant.sources];
       ws.serializeAttachment(session);
-      room.maybeStartQualification();
       room.sourceRevision++;
+      await Promise.all([
+        room.state.storage.put("sourceRevision", room.sourceRevision),
+        stalePublications.length
+          ? room.state.storage.put("publishedSources", [
+              ...room.publishedSources.values(),
+            ])
+          : Promise.resolve(),
+      ]);
+      for (const publication of stalePublications)
+        for (const recipient of room.participants.values())
+          if (recipient.ws && recipient.ws !== ws)
+            room.sendMessage(
+              recipient.ws,
+              MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+              publication,
+            );
+      await room.refreshPendingRouteSourceRevision?.();
+      room.maybeStartQualification();
       room.broadcastTopology();
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED: {
-      if (Number(data.epoch) !== room.epoch) break;
+      if (
+        Number(data.epoch) !== room.epoch ||
+        room.route.kind !== "p2p" ||
+        room.route.path !== "direct" ||
+        room.route.reason !== "qualifying-direct"
+      )
+        break;
       const participant = room.participants.get(
         `${session.userId}:${session.deviceId}`,
       );
@@ -94,8 +135,17 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED:
+      if (
+        Number(data.epoch) !== room.epoch ||
+        room.route.kind !== "p2p" ||
+        room.route.path !== "direct" ||
+        !["qualifying-direct", "qualified-direct-mesh"].includes(
+          room.route.reason,
+        )
+      )
+        break;
       room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED, {
-        epoch: Number(data.epoch) || room.epoch,
+        epoch: room.epoch,
         acknowledged: true,
         failed: true,
         reason: data.reason || "p2p-failed",
@@ -128,7 +178,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       await handleTopologyReady(room, session, data);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED:
-      if (room.pendingRoute && Number(data.epoch) === room.pendingRoute.epoch)
+      if (
+        room.pendingRoute &&
+        Number(data.epoch) === room.pendingRoute.epoch &&
+        Number(data.sourceRevision) === room.pendingRoute.sourceRevision
+      )
         await handleProviderFailure(
           room,
           room.pendingRoute.provider,
@@ -139,15 +193,26 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       mediaDebug(room.env, "room.provider-failure", {
         provider: data.provider,
         epoch: data.epoch,
+        sourceRevision: data.sourceRevision,
         reason: data.reason,
       });
+      const sourceRevision = Number(data.sourceRevision);
       const failedPending =
-        room.pendingRoute && Number(data.epoch) === room.pendingRoute.epoch;
+        room.pendingRoute &&
+        Number(data.epoch) === room.pendingRoute.epoch &&
+        sourceRevision === room.pendingRoute.sourceRevision;
       const failedActive =
         room.route.kind === "sfu" &&
         room.route.provider === data.provider &&
-        Number(data.epoch) === room.route.epoch;
-      if (failedPending || failedActive) {
+        Number(data.epoch) === room.route.epoch &&
+        sourceRevision === room.sourceRevision;
+      const failedQualificationFallback =
+        room.route.kind === "p2p" &&
+        room.route.reason === "qualifying-direct" &&
+        room.qualificationFallbackRoute?.provider === data.provider &&
+        Number(data.epoch) === room.route.epoch &&
+        sourceRevision === room.sourceRevision;
+      if (failedPending || failedActive || failedQualificationFallback) {
         room.providerReadiness.clear();
         room.transitionReadiness.clear();
         await handleProviderFailure(
@@ -246,9 +311,10 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     capabilities: session.providerCapabilities,
   });
   const participantKey = `${claims.sub}:${claims.deviceId}`;
+  const resumedParticipant = room.participants.get(participantKey);
+  room.replaceParticipantSession(participantKey, resumedParticipant, ws);
   if (room.participants.size === 0 && room.epoch === 0)
     room.commitRoute(room.createInitialRoute("room-ready"));
-  const resumedParticipant = room.participants.get(participantKey);
   room.participants.set(participantKey, {
     userId: claims.sub,
     deviceId: claims.deviceId,
@@ -260,6 +326,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     joinedAt: resumedParticipant?.joinedAt || now,
     disconnectedAt: null,
   });
+  await room.refreshPendingRouteSourceRevision?.();
   room.sendMessage(ws, "connected", { peerId: session.peerId });
   if (room.participants.size === 1 && room.epoch === 0)
     await room.commitRoute(room.createInitialRoute("single-participant"));
@@ -283,11 +350,13 @@ async function handleProviderReady(room, ws, session, data) {
   if (
     !room.pendingRoute ||
     Number(data.epoch) !== room.pendingRoute.epoch ||
+    Number(data.sourceRevision) !== room.pendingRoute.sourceRevision ||
     data.provider !== room.pendingRoute.provider
   )
     return;
   room.providerReadiness.add(session.peerId);
   session.providerReadyEpoch = Number(data.epoch);
+  session.providerReadySourceRevision = Number(data.sourceRevision);
   ws.serializeAttachment(session);
   room.providerHealth.set(data.provider, {
     healthy: true,
@@ -303,7 +372,13 @@ async function handleProviderReady(room, ws, session, data) {
 }
 
 async function handleTopologyReady(room, session, data) {
-  if (!room.pendingRoute || Number(data.epoch) !== room.pendingRoute.epoch)
+  if (
+    !room.pendingRoute ||
+    room.pendingRoute.kind !== "sfu" ||
+    data.target !== "sfu" ||
+    Number(data.epoch) !== room.pendingRoute.epoch ||
+    Number(data.sourceRevision) !== room.pendingRoute.sourceRevision
+  )
     return;
   room.transitionReadiness.add(session.peerId);
   await room.maybeCommitPendingRoute();

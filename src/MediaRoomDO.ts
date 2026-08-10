@@ -37,6 +37,7 @@ import {
   commitRoute,
   maybeCommitPendingRoute,
   maybeStartQualification,
+  restoreQualificationRoute,
 } from "./media-room-topology.ts";
 import { mediaDebug } from "./debug.ts";
 
@@ -68,6 +69,9 @@ export class MediaRoomDO {
     this.transitionInFlight = false;
     this.qualifiedParticipantSignature = null;
     this.qualificationStartedAt = 0;
+    this.qualificationFallbackRoute = null;
+    this.qualificationParticipantSignature = null;
+    this.pendingRouteRefresh = null;
     this.stateLoaded = false;
   }
 
@@ -222,7 +226,7 @@ export class MediaRoomDO {
         participant.disconnectedAt &&
         now - participant.disconnectedAt >= 10_000
       )
-        this.finalizeParticipantDisconnect(participantKey, participant);
+        await this.finalizeParticipantDisconnect(participantKey, participant);
     if (sockets.length > 0 || this.participants.size > 0)
       await this.state.storage.setAlarm?.(now + CONTROL_HEARTBEAT_INTERVAL_MS);
     if (
@@ -237,7 +241,7 @@ export class MediaRoomDO {
       this.getConnectionMode() === "auto" &&
       !this.pendingRoute &&
       !this.transitionInFlight &&
-      this.route.kind !== MEDIA_ROUTE_KIND.P2P
+      this.route.kind !== MEDIA_ROUTE_KIND.SFU
     )
       void this.beginTransition(recoveryProvider, "provider-cooldown-expired");
     this.scheduleProviderRecovery(now);
@@ -261,6 +265,8 @@ export class MediaRoomDO {
       qualificationStartedAt,
       providerConfig,
       providerHealth,
+      qualificationFallbackRoute,
+      qualificationParticipantSignature,
     ] = await Promise.all([
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
@@ -272,6 +278,8 @@ export class MediaRoomDO {
       this.state.storage.get("qualificationStartedAt"),
       this.state.storage.get("providerConfig"),
       this.state.storage.get("providerHealth"),
+      this.state.storage.get("qualificationFallbackRoute"),
+      this.state.storage.get("qualificationParticipantSignature"),
     ]);
     if (route) this.route = route;
     if (Number.isSafeInteger(epoch)) this.epoch = epoch;
@@ -295,6 +303,14 @@ export class MediaRoomDO {
       this.providerConfig = providerConfig;
     if (providerHealth && typeof providerHealth === "object")
       this.providerHealth = new Map(Object.entries(providerHealth));
+    if (
+      qualificationFallbackRoute?.kind === MEDIA_ROUTE_KIND.SFU &&
+      qualificationFallbackRoute.provider
+    )
+      this.qualificationFallbackRoute = qualificationFallbackRoute;
+    if (typeof qualificationParticipantSignature === "string")
+      this.qualificationParticipantSignature =
+        qualificationParticipantSignature;
     this.stateLoaded = true;
     for (const ws of this.state.getWebSockets?.() || []) this.getSession(ws);
   }
@@ -304,27 +320,34 @@ export class MediaRoomDO {
     if (current) return current;
     const restored = ws.deserializeAttachment?.();
     if (!restored) return restored;
-    this.sessions.set(ws, restored);
     if (restored.authenticated) {
       const participantKey = `${restored.userId}:${restored.deviceId}`;
-      this.participants.set(participantKey, {
-        userId: restored.userId,
-        deviceId: restored.deviceId,
-        channelId: restored.channelId,
-        peerId: restored.peerId,
-        ws,
-        sources: new Set(restored.sources || []),
-        providerCapabilities: new Set(restored.providerCapabilities || []),
-        joinedAt: restored.joinedAt || Date.now(),
-      });
-      if (Array.isArray(restored.qualifiedPeerIds))
-        this.qualificationState.set(restored.peerId, {
-          qualifiedPeers: new Set(restored.qualifiedPeerIds),
-          ready: true,
+      const previousParticipant = this.participants.get(participantKey);
+      if (!previousParticipant?.ws || previousParticipant.ws === ws) {
+        this.participants.set(participantKey, {
+          userId: restored.userId,
+          deviceId: restored.deviceId,
+          channelId: restored.channelId,
+          peerId: restored.peerId,
+          ws,
+          sources: new Set(restored.sources || []),
+          providerCapabilities: new Set(restored.providerCapabilities || []),
+          joinedAt: restored.joinedAt || Date.now(),
         });
-      if (restored.providerReadyEpoch === this.pendingRoute?.epoch)
-        this.providerReadiness.add(restored.peerId);
+        if (Array.isArray(restored.qualifiedPeerIds))
+          this.qualificationState.set(restored.peerId, {
+            qualifiedPeers: new Set(restored.qualifiedPeerIds),
+            ready: true,
+          });
+        if (
+          restored.providerReadyEpoch === this.pendingRoute?.epoch &&
+          restored.providerReadySourceRevision ===
+            this.pendingRoute?.sourceRevision
+        )
+          this.providerReadiness.add(restored.peerId);
+      }
     }
+    this.sessions.set(ws, restored);
     return restored;
   }
 
@@ -345,6 +368,11 @@ export class MediaRoomDO {
 
   sendTopology(ws, extra = {}) {
     const pending = this.pendingRoute;
+    const qualificationFallbackProvider =
+      this.route.kind === MEDIA_ROUTE_KIND.P2P &&
+      this.route.reason === "qualifying-direct"
+        ? this.qualificationFallbackRoute?.provider
+        : undefined;
     const mode = pending
       ? "switching"
       : this.route.kind === MEDIA_ROUTE_KIND.LOCAL
@@ -359,7 +387,10 @@ export class MediaRoomDO {
       mode,
       epoch: pending?.epoch || this.epoch,
       preparedEpoch: pending?.epoch || this.epoch,
-      provider: pending?.provider || this.route.provider,
+      provider:
+        pending?.provider ||
+        this.route.provider ||
+        qualificationFallbackProvider,
       reason: pending?.reason || this.route.reason,
       target: pending ? "sfu" : undefined,
       targetProvider: pending?.provider,
@@ -377,17 +408,92 @@ export class MediaRoomDO {
         this.sendTopology(ws);
   }
 
-  async relayP2PSignal(fromSession, data) {
-    if (!data.targetPeerId) return;
+  async relayP2PSignal(fromSession, data, ws) {
+    const sender = this.participants.get(
+      `${fromSession.userId}:${fromSession.deviceId}`,
+    );
+    const epoch = Number(data?.epoch);
+    const targetPeerId = String(data?.targetPeerId || "");
+    if (
+      !sender ||
+      sender.ws !== ws ||
+      !Number.isSafeInteger(epoch) ||
+      epoch !== this.epoch ||
+      this.route.kind !== MEDIA_ROUTE_KIND.P2P ||
+      this.route.path !== "direct" ||
+      !targetPeerId ||
+      !data.signal ||
+      typeof data.signal !== "object"
+    )
+      return;
     for (const [ws, session] of this.sessions) {
-      if (session.peerId === data.targetPeerId && session.authenticated) {
+      if (
+        String(session.peerId) === targetPeerId &&
+        session.authenticated &&
+        this.isCurrentParticipantSession(ws, session)
+      ) {
         this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_SIGNAL, {
-          peerId: fromSession.peerId,
-          ...data.signal,
+          fromPeerId: fromSession.peerId,
+          epoch,
+          signal: data.signal,
         });
         break;
       }
     }
+  }
+
+  isCurrentParticipantSession(ws, session) {
+    if (!session?.authenticated) return false;
+    const participant = this.participants.get(
+      `${session.userId}:${session.deviceId}`,
+    );
+    const registered = this.sessions.get(ws);
+    return (
+      participant?.ws === ws &&
+      participant.peerId === session.peerId &&
+      (!registered || registered === session)
+    );
+  }
+
+  replaceParticipantSession(participantKey, previousParticipant, nextWs) {
+    if (!previousParticipant || previousParticipant.ws === nextWs) return;
+    const previousWs = previousParticipant.ws;
+    const previousSession = previousWs
+      ? this.sessions.get(previousWs) || previousWs.deserializeAttachment?.()
+      : null;
+    const previousPeerId =
+      previousParticipant.peerId || previousSession?.peerId || null;
+    if (previousWs) this.sessions.delete(previousWs);
+    if (previousPeerId) {
+      this.qualificationState.delete(previousPeerId);
+      this.providerReadiness.delete(previousPeerId);
+      this.transitionReadiness.delete(previousPeerId);
+      this.qoeMetrics.delete(previousPeerId);
+      for (const key of this.publishedSources.keys())
+        if (key.startsWith(`${previousPeerId}:`))
+          this.publishedSources.delete(key);
+    }
+    this.qualifiedParticipantSignature = null;
+    this.sourceRevision++;
+    void Promise.all([
+      this.state.storage.put("publishedSources", [
+        ...this.publishedSources.values(),
+      ]),
+      this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put(
+        "qualifiedParticipantSignature",
+        this.qualifiedParticipantSignature,
+      ),
+    ]);
+    try {
+      previousWs?.close(4000, "Media session superseded");
+    } catch {}
+    mediaDebug(this.env, "room.participant-session-replaced", {
+      participantKey,
+      previousPeerId,
+      sourceRevision: this.sourceRevision,
+    });
+    void this.refreshPendingRouteSourceRevision();
   }
 
   getConfiguredProviderCapabilities() {
@@ -442,6 +548,62 @@ export class MediaRoomDO {
     return issueProviderTicket(this, ...args);
   }
 
+  refreshPendingRouteSourceRevision() {
+    const refresh = async () => {
+      let refreshed = false;
+      while (
+        this.pendingRoute &&
+        Number(this.pendingRoute.sourceRevision) !== this.sourceRevision
+      ) {
+        const previousRoute = this.pendingRoute;
+        const nextRoute = {
+          ...previousRoute,
+          sourceRevision: this.sourceRevision,
+        };
+        this.pendingRoute = nextRoute;
+        this.pendingStartedAt = Date.now();
+        this.providerReadiness.clear();
+        this.transitionReadiness.clear();
+        for (const [ws, session] of this.sessions) {
+          session.providerReadyEpoch = null;
+          session.providerReadySourceRevision = null;
+          ws.serializeAttachment?.(session);
+        }
+        await Promise.all([
+          this.state.storage.put("pendingRoute", nextRoute),
+          this.state.storage.put("pendingStartedAt", this.pendingStartedAt),
+        ]);
+        this.broadcastTopology();
+        if (
+          nextRoute.provider === SFU_PROVIDER.MEDIASOUP &&
+          this.pendingRoute === nextRoute
+        )
+          try {
+            await this.issueProviderTickets(nextRoute);
+          } catch (error) {
+            mediaDebug(this.env, "room.pending-route-refresh-failed", {
+              provider: nextRoute.provider,
+              epoch: nextRoute.epoch,
+              sourceRevision: nextRoute.sourceRevision,
+              error,
+            });
+            void this.state.storage.setAlarm?.(Date.now() + 1_000);
+          }
+        refreshed = true;
+      }
+      return refreshed;
+    };
+    const task = (this.pendingRouteRefresh || Promise.resolve())
+      .catch(() => {})
+      .then(refresh);
+    const tracked = task.finally(() => {
+      if (this.pendingRouteRefresh === tracked) this.pendingRouteRefresh = null;
+    });
+    this.pendingRouteRefresh = tracked;
+    tracked.catch(() => {});
+    return tracked;
+  }
+
   createProviderTicket(...args) {
     return createProviderTicket(this, ...args);
   }
@@ -456,6 +618,10 @@ export class MediaRoomDO {
 
   checkQualificationComplete() {
     return checkQualificationComplete(this);
+  }
+
+  restoreQualificationRoute(...args) {
+    return restoreQualificationRoute(this, ...args);
   }
 
   commitRoute(route) {
@@ -522,18 +688,27 @@ export class MediaRoomDO {
       this.stopControlLeaseTimer();
   }
 
-  finalizeParticipantDisconnect(participantKey, participant) {
+  async finalizeParticipantDisconnect(participantKey, participant) {
     if (!this.participants.delete(participantKey)) return;
     this.sourceRevision++;
+    this.qualifiedParticipantSignature = null;
     this.qualificationState.delete(participant.peerId);
     this.providerReadiness.delete(participant.peerId);
     this.transitionReadiness.delete(participant.peerId);
     for (const key of this.publishedSources.keys())
       if (key.startsWith(`${participant.peerId}:`))
         this.publishedSources.delete(key);
-    void this.state.storage.put("publishedSources", [
-      ...this.publishedSources.values(),
+    void Promise.all([
+      this.state.storage.put("publishedSources", [
+        ...this.publishedSources.values(),
+      ]),
+      this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put(
+        "qualifiedParticipantSignature",
+        this.qualifiedParticipantSignature,
+      ),
     ]);
+    await this.refreshPendingRouteSourceRevision();
     if (this.participants.size < 2) {
       void this.commitRoute(
         createLocalRoute(
@@ -544,8 +719,9 @@ export class MediaRoomDO {
       ).then(() => this.maybeStartQualification());
     } else if (this.route.kind === MEDIA_ROUTE_KIND.P2P) {
       this.maybeStartQualification();
-    } else if (this.pendingRoute) {
-      void this.maybeCommitPendingRoute();
+    } else {
+      this.maybeStartQualification();
+      if (this.pendingRoute) void this.maybeCommitPendingRoute();
     }
   }
 

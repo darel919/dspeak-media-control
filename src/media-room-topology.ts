@@ -5,11 +5,13 @@ import {
   SFU_PROVIDER,
   checkP2PEligibility,
   createP2PRoute,
+  createSFURoute,
 } from "./protocol.js";
 import { qoeWouldImprove, rankQoeCandidates } from "./qoe.ts";
 import { mediaDebug } from "./debug.ts";
 import {
   getQoeCandidates,
+  getAvailableProviderCapabilities,
   getProviderRecoveryTarget,
   getNextProviderRecoveryAt,
   scheduleProviderRecovery,
@@ -66,14 +68,24 @@ export function maybeStartQualification(room) {
       });
       return;
     }
-    if (
-      !room.pendingRoute &&
-      (room.route.kind !== MEDIA_ROUTE_KIND.SFU ||
-        room.route.provider !== SFU_PROVIDER.CLOUDFLARE_REALTIME)
-    )
-      void room.beginTransition(SFU_PROVIDER.CLOUDFLARE_REALTIME);
+    if (!room.pendingRoute) {
+      const fallbackProvider = room.qualificationFallbackRoute?.provider;
+      if (
+        fallbackProvider &&
+        getAvailableProviderCapabilities(room).has(fallbackProvider)
+      )
+        void room.restoreQualificationRoute(
+          `p2p-ineligible-${eligibility.reason}`,
+        );
+      else if (
+        room.route.kind !== MEDIA_ROUTE_KIND.SFU ||
+        room.route.provider !== SFU_PROVIDER.CLOUDFLARE_REALTIME
+      )
+        void room.beginTransition(SFU_PROVIDER.CLOUDFLARE_REALTIME);
+    }
     return;
   }
+  if (room.pendingRoute) return;
   if (participantCount === 1) {
     if (
       connectionMode === "auto" &&
@@ -83,28 +95,47 @@ export function maybeStartQualification(room) {
       void room.beginTransition(SFU_PROVIDER.CLOUDFLARE_REALTIME);
     return;
   }
+  if (connectionMode === "auto" && room.route.kind === MEDIA_ROUTE_KIND.LOCAL) {
+    void room.beginTransition(
+      SFU_PROVIDER.CLOUDFLARE_REALTIME,
+      "qualification-fallback",
+    );
+    return;
+  }
+  if (
+    room.route.kind === MEDIA_ROUTE_KIND.P2P &&
+    room.route.reason === "qualifying-direct" &&
+    room.route.sourceRevision === room.sourceRevision &&
+    room.qualificationParticipantSignature === room.getParticipantSignature()
+  )
+    return;
   if (
     room.route.kind === MEDIA_ROUTE_KIND.P2P &&
     room.route.reason === "qualified-direct-mesh" &&
     room.qualifiedParticipantSignature === room.getParticipantSignature()
   )
     return;
-  if (room.pendingRoute) {
-    room.pendingRoute = null;
-    room.pendingStartedAt = 0;
-    room.epoch += 1;
-    room.providerReadiness.clear();
-    room.transitionReadiness.clear();
-    void Promise.all([
-      room.state.storage.put("epoch", room.epoch),
-      room.state.storage.delete("pendingRoute"),
-      room.state.storage.delete("pendingStartedAt"),
-    ]);
-  }
   const allReady = [...room.participants.values()].every(
     (participant) => participant.ws?.readyState === WebSocket.OPEN,
   );
   if (!allReady) return;
+  const fallbackRoute =
+    room.route.kind === MEDIA_ROUTE_KIND.SFU && room.route.provider
+      ? { ...room.route }
+      : room.route.kind === MEDIA_ROUTE_KIND.P2P &&
+          room.route.reason === "qualifying-direct" &&
+          room.qualificationFallbackRoute
+        ? { ...room.qualificationFallbackRoute }
+        : null;
+  room.qualificationFallbackRoute = fallbackRoute;
+  room.qualificationParticipantSignature = room.getParticipantSignature();
+  room.qualificationState.clear();
+  for (const [ws, session] of room.sessions) {
+    session.qualifiedPeerIds = [];
+    session.providerReadyEpoch = null;
+    session.providerReadySourceRevision = null;
+    ws.serializeAttachment?.(session);
+  }
   room.route = createP2PRoute(
     P2P_PATH.DIRECT,
     ++room.epoch,
@@ -112,26 +143,29 @@ export function maybeStartQualification(room) {
     "qualifying-direct",
   );
   room.qualificationStartedAt = Date.now();
-  void room.state.storage.put(
-    "qualificationStartedAt",
-    room.qualificationStartedAt,
-  );
+  void Promise.all([
+    room.state.storage.put("route", room.route),
+    room.state.storage.put("epoch", room.epoch),
+    room.state.storage.put("sourceRevision", room.sourceRevision),
+    room.state.storage.put(
+      "qualificationStartedAt",
+      room.qualificationStartedAt,
+    ),
+    room.state.storage.put(
+      "qualificationParticipantSignature",
+      room.qualificationParticipantSignature,
+    ),
+    fallbackRoute
+      ? room.state.storage.put("qualificationFallbackRoute", fallbackRoute)
+      : room.state.storage.delete("qualificationFallbackRoute"),
+  ]);
   room.transitionGeneration++;
   mediaDebug(room.env, "room.p2p-qualification-start", {
     epoch: room.epoch,
     participants: room.participants.size,
   });
   for (const participant of room.participants.values())
-    room.sendMessage(
-      participant.ws,
-      MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE,
-      {
-        route: room.route,
-        epoch: room.epoch,
-        sourceRevision: room.sourceRevision,
-        action: "qualify-p2p",
-      },
-    );
+    room.sendTopology(participant.ws, { action: "qualify-p2p" });
 }
 
 export function checkQualificationComplete(room) {
@@ -178,8 +212,7 @@ export function checkQualificationComplete(room) {
       stableSince: room.qualificationStartedAt,
     },
   ])[0];
-  const activeProvider =
-    room.route.kind === MEDIA_ROUTE_KIND.SFU ? room.route.provider : null;
+  const activeProvider = room.qualificationFallbackRoute?.provider || null;
   const activeCandidate = rankQoeCandidates(getQoeCandidates(room)).find(
     (candidate) => candidate.provider === activeProvider,
   );
@@ -213,12 +246,18 @@ export function commitRoute(room, route) {
     });
     return Promise.resolve(false);
   }
+  const shouldStartQualification =
+    route.kind === MEDIA_ROUTE_KIND.SFU &&
+    route.reason === "qualification-fallback";
   room.route = route;
   room.epoch = route.epoch;
   room.qualifiedParticipantSignature =
     route.kind === MEDIA_ROUTE_KIND.P2P ? room.getParticipantSignature() : null;
   room.pendingRoute = null;
   room.pendingStartedAt = 0;
+  room.providerReadiness.clear();
+  room.qualificationFallbackRoute = null;
+  room.qualificationParticipantSignature = null;
   if (route.kind === MEDIA_ROUTE_KIND.SFU && route.provider)
     room.providerHealth.set(route.provider, {
       healthy: true,
@@ -252,6 +291,8 @@ export function commitRoute(room, route) {
     ),
     room.state.storage.delete("pendingRoute"),
     room.state.storage.delete("pendingStartedAt"),
+    room.state.storage.delete("qualificationFallbackRoute"),
+    room.state.storage.delete("qualificationParticipantSignature"),
   ]);
   room.broadcastTopology();
   for (const [ws, session] of room.sessions)
@@ -270,5 +311,26 @@ export function commitRoute(room, route) {
         participants: room.getParticipantList(),
         peers: room.getParticipantList(),
       });
-  return persistence.then(() => true);
+  return persistence.then(() => {
+    if (shouldStartQualification) void room.maybeStartQualification?.();
+    return true;
+  });
+}
+
+export function restoreQualificationRoute(
+  room,
+  reason = "p2p-qualification-failed",
+) {
+  const fallback = room.qualificationFallbackRoute;
+  if (!fallback?.provider) return Promise.resolve(false);
+  if (!getAvailableProviderCapabilities(room).has(fallback.provider))
+    return Promise.resolve(false);
+  return room.commitRoute(
+    createSFURoute(
+      fallback.provider,
+      room.epoch + 1,
+      room.sourceRevision,
+      reason,
+    ),
+  );
 }

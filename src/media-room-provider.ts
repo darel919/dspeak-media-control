@@ -95,7 +95,12 @@ export function getQoeCandidates(room) {
   for (const report of room.qoeMetrics.values()) {
     const provider =
       report.provider === "sfu"
-        ? room.route.provider || SFU_PROVIDER.CLOUDFLARE_REALTIME
+        ? room.route.provider ||
+          (room.route.kind === MEDIA_ROUTE_KIND.P2P &&
+          room.route.reason === "qualifying-direct"
+            ? room.qualificationFallbackRoute?.provider
+            : null) ||
+          SFU_PROVIDER.CLOUDFLARE_REALTIME
         : report.provider;
     if (!["p2p", ...getConfiguredProviderCapabilities(room)].includes(provider))
       continue;
@@ -141,7 +146,13 @@ export async function handleCloudflareRequest(room, ws, session, data) {
       requestId,
       ...result,
     });
-  const selectedProvider = room.pendingRoute?.provider || room.route.provider;
+  const selectedProvider =
+    room.pendingRoute?.provider ||
+    room.route.provider ||
+    (room.route.kind === MEDIA_ROUTE_KIND.P2P &&
+    room.route.reason === "qualifying-direct"
+      ? room.qualificationFallbackRoute?.provider
+      : null);
   if (selectedProvider !== SFU_PROVIDER.CLOUDFLARE_REALTIME) {
     sendResult({ error: "Cloudflare Realtime is not the active route" });
     return;
@@ -242,12 +253,28 @@ export async function handleCloudflareRequest(room, ws, session, data) {
 export function handleP2PFailure(room, session, reason) {
   if (room.route.kind !== MEDIA_ROUTE_KIND.P2P || room.route.path !== "direct")
     return;
+  const participant = room.participants.get(
+    `${session.userId}:${session.deviceId}`,
+  );
+  const participantWs = participant?.ws;
   if (room.getConnectionMode() === "direct") {
-    room.sendMessage(session.ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+    room.sendMessage(participantWs, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
       code: "DIRECT_MEDIA_UNAVAILABLE",
       error: "Direct media connection failed",
     });
     return;
+  }
+  const qualificationFallback = room.qualificationFallbackRoute;
+  if (
+    qualificationFallback?.provider &&
+    getAvailableProviderCapabilities(room).has(qualificationFallback.provider)
+  ) {
+    void room.restoreQualificationRoute(`p2p-failed-${reason}`);
+    return;
+  }
+  if (qualificationFallback) {
+    room.qualificationFallbackRoute = null;
+    void room.state.storage.delete("qualificationFallbackRoute");
   }
   const available = getAvailableProviderCapabilities(room);
   const fallback = available.has(SFU_PROVIDER.CLOUDFLARE_REALTIME)
@@ -259,7 +286,7 @@ export function handleP2PFailure(room, session, reason) {
     void beginTransition(room, fallback, `p2p-failed-${reason}`);
     return;
   }
-  room.sendMessage(session.ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+  room.sendMessage(participantWs, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
     code: "MEDIA_PROVIDER_UNAVAILABLE",
     error: "No configured SFU provider is available",
   });
@@ -283,7 +310,7 @@ export async function handleProviderFailure(room, provider, reason) {
     room.sendMessage(
       participant.ws,
       MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE,
-      { provider, epoch, reason },
+      { provider, epoch, sourceRevision: room.sourceRevision, reason },
     );
   if (
     provider === SFU_PROVIDER.MEDIASOUP &&
@@ -328,6 +355,10 @@ export async function handleProviderFailure(room, provider, reason) {
       room.state.storage.delete("pendingRoute"),
       room.state.storage.delete("pendingStartedAt"),
     ]);
+  }
+  if (room.qualificationFallbackRoute?.provider === provider) {
+    room.qualificationFallbackRoute = null;
+    void room.state.storage.delete("qualificationFallbackRoute");
   }
   await beginTransition(room, alternate, `provider-failed-${reason}`, provider);
 }
