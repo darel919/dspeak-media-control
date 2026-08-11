@@ -266,6 +266,7 @@ export class MediaRoomDO {
         this.pendingRoute.providerId,
         this.pendingRoute.epoch,
         this.pendingRoute.sourceRevision,
+        this.pendingRoute,
       );
   }
 

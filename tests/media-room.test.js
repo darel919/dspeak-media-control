@@ -1369,6 +1369,68 @@ test("a failed P2P qualification restores a healthy fallback SFU", async () => {
   assert.equal(instance.qualificationFallbackRoute, null);
 });
 
+test("a failed qualification fallback is invalidated using its own route epoch", async () => {
+  const instance = room();
+  instance.env.CLOUDFLARE_REALTIME_APP_ID = "";
+  instance.env.CLOUDFLARE_REALTIME_APP_SECRET = "";
+  instance.env.DSPEAK_SFU_ENABLED = "true";
+  instance.env.DSPEAK_SFU_SIGNALING_URL = "wss://sfu.test/socket";
+  instance.route = createP2PRoute("direct", 5, 7, "qualifying-direct");
+  instance.epoch = 5;
+  instance.sourceRevision = 7;
+  instance.qualificationFallbackRoute = createSFURoute(
+    SFU_PROVIDER.MEDIASOUP,
+    4,
+    7,
+    "active-sfu",
+    "sfu-singapore",
+  );
+  const ws = { readyState: 1, send() {}, serializeAttachment() {} };
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    channelId: "channel-1",
+    peerId: "peer-1",
+  };
+  instance.sessions.set(ws, session);
+  instance.participants.clear();
+  instance.participants.set("user-1:device-1", {
+    ...session,
+    ws,
+    sources: new Set(),
+    providerCapabilities: new Set([SFU_PROVIDER.MEDIASOUP]),
+  });
+  let restored = false;
+  instance.restoreQualificationRoute = async () => {
+    restored = true;
+  };
+
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE,
+    data: {
+      provider: SFU_PROVIDER.MEDIASOUP,
+      providerId: "sfu-singapore",
+      epoch: 5,
+      sourceRevision: 7,
+      reason: "transport-down",
+    },
+  });
+
+  assert.equal(instance.qualificationFallbackRoute, null);
+  assert.equal(
+    instance.providerHealth.get("mediasoup:sfu-singapore")?.healthy,
+    false,
+  );
+
+  const health = instance.providerHealth.get("mediasoup:sfu-singapore");
+  health.unhealthyUntil = Date.now() - 1;
+  await instance.handleP2PFailure(session, "ice-timeout");
+
+  assert.equal(restored, false);
+  assert.equal(instance.route.kind, MEDIA_ROUTE_KIND.P2P);
+});
+
 test("stale P2P failure and qualification messages cannot change the active route", async () => {
   const instance = room();
   const ws = {

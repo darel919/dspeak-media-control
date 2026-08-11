@@ -275,6 +275,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           data.providerId || null,
           Number(data.epoch),
           Number(data.sourceRevision),
+          room.pendingRoute,
         );
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE: {
@@ -301,6 +302,13 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         Number(data.epoch) === room.route.epoch &&
         sourceRevision === room.sourceRevision &&
         matchesProviderIdentity(room.qualificationFallbackRoute, data);
+      const failedRoute = failedPending
+        ? room.pendingRoute
+        : failedActive
+          ? room.route
+          : failedQualificationFallback
+            ? room.qualificationFallbackRoute
+            : null;
       if (failedPending || failedActive || failedQualificationFallback) {
         if (failedPending || !room.pendingRoute) {
           room.providerReadiness.clear();
@@ -313,6 +321,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           data.providerId || null,
           Number(data.epoch),
           sourceRevision,
+          failedRoute,
         );
       }
       break;

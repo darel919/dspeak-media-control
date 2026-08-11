@@ -388,6 +388,7 @@ export async function handleProviderFailure(
   failedProviderId = null,
   failedEpoch = null,
   failedSourceRevision = null,
+  failedRoute = null,
 ) {
   if (!provider) return;
   const normalizedEpoch =
@@ -402,6 +403,13 @@ export async function handleProviderFailure(
       : Number.isSafeInteger(Number(failedSourceRevision))
         ? Number(failedSourceRevision)
         : null;
+  const explicitFailedRoute =
+    failedRoute?.provider === provider &&
+    (failedRoute.providerId
+      ? failedRoute.providerId === failedProviderId
+      : !failedProviderId)
+      ? failedRoute
+      : null;
   const routeMatchesFailure = (route) => {
     if (!route || route.provider !== provider) return false;
     if (
@@ -419,32 +427,38 @@ export async function handleProviderFailure(
       return false;
     return true;
   };
-  const pendingFailed = routeMatchesFailure(room.pendingRoute);
-  const activeFailed = routeMatchesFailure(room.route);
-  const qualificationFallbackFailed = routeMatchesFailure(
-    room.qualificationFallbackRoute,
-  );
-  const failedRoute = pendingFailed
-    ? room.pendingRoute
-    : activeFailed
-      ? room.route
-      : qualificationFallbackFailed
-        ? room.qualificationFallbackRoute
-        : null;
+  const pendingFailed = explicitFailedRoute
+    ? explicitFailedRoute === room.pendingRoute
+    : routeMatchesFailure(room.pendingRoute);
+  const activeFailed = explicitFailedRoute
+    ? explicitFailedRoute === room.route
+    : routeMatchesFailure(room.route);
+  const qualificationFallbackFailed = explicitFailedRoute
+    ? explicitFailedRoute === room.qualificationFallbackRoute
+    : routeMatchesFailure(room.qualificationFallbackRoute);
+  const matchedRoute =
+    explicitFailedRoute ||
+    (pendingFailed
+      ? room.pendingRoute
+      : activeFailed
+        ? room.route
+        : qualificationFallbackFailed
+          ? room.qualificationFallbackRoute
+          : null);
   const providerId =
     failedProviderId ||
-    failedRoute?.providerId ||
+    matchedRoute?.providerId ||
     (room.providerConfig?.provider === provider
       ? room.providerConfig.id
       : null);
   const epoch =
     normalizedEpoch ??
-    failedRoute?.epoch ??
+    matchedRoute?.epoch ??
     room.pendingRoute?.epoch ??
     room.route.epoch;
   const sourceRevision =
     normalizedSourceRevision ??
-    failedRoute?.sourceRevision ??
+    matchedRoute?.sourceRevision ??
     room.sourceRevision;
   room.providerHealth.set(providerHealthKey(provider, providerId), {
     healthy: false,
@@ -697,6 +711,7 @@ export async function beginTransition(
       targetRoute.providerId,
       targetRoute.epoch,
       targetRoute.sourceRevision,
+      targetRoute,
     );
     return;
   }
