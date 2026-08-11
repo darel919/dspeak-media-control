@@ -141,6 +141,8 @@ export class MediaRoomDO {
       mediaSessionId: crypto.randomUUID(),
       providerCapabilities: [...this.getConfiguredProviderCapabilities()],
       sources: [],
+      muted: true,
+      deafened: false,
       joinedAt: Date.now(),
     };
     this.state.acceptWebSocket(ws);
@@ -235,13 +237,23 @@ export class MediaRoomDO {
     )
       this.checkQualificationComplete();
     const recoveryProvider = this.getProviderRecoveryTarget(now);
+    const activeProvider =
+      this.route.kind === MEDIA_ROUTE_KIND.SFU ? this.route.provider : null;
+    const activeProviderHealth = activeProvider
+      ? this.providerHealth.get(activeProvider)
+      : null;
+    const retryActiveProvider = Boolean(
+      activeProvider &&
+      activeProviderHealth?.healthy === false &&
+      Number(activeProviderHealth.unhealthyUntil) <= now,
+    );
     if (
       recoveryProvider &&
       this.participants.size > 0 &&
       this.getConnectionMode() === "auto" &&
       !this.pendingRoute &&
       !this.transitionInFlight &&
-      this.route.kind !== MEDIA_ROUTE_KIND.SFU
+      (this.route.kind !== MEDIA_ROUTE_KIND.SFU || retryActiveProvider)
     )
       void this.beginTransition(recoveryProvider, "provider-cooldown-expired");
     this.scheduleProviderRecovery(now);
@@ -332,6 +344,8 @@ export class MediaRoomDO {
           ws,
           sources: new Set(restored.sources || []),
           providerCapabilities: new Set(restored.providerCapabilities || []),
+          muted: restored.muted !== false,
+          deafened: restored.deafened === true,
           joinedAt: restored.joinedAt || Date.now(),
         });
         if (Array.isArray(restored.qualifiedPeerIds))
@@ -649,6 +663,8 @@ export class MediaRoomDO {
       userId: participant.userId,
       deviceId: participant.deviceId,
       sources: [...participant.sources],
+      muted: participant.muted !== false,
+      deafened: participant.deafened === true,
     }));
   }
 

@@ -7,6 +7,7 @@ import {
 import { verifyMediaTicket } from "./tickets.js";
 import {
   MAX_CONTROL_MESSAGE_BYTES,
+  normalizeParticipantVoiceState,
   normalizeMediaSources,
 } from "./media-room-contracts.ts";
 import {
@@ -50,8 +51,37 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       await room.relayP2PSignal(session, data, ws);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY:
-    case MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE:
       break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE: {
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      const voiceState = normalizeParticipantVoiceState(data);
+      if (!participant || !voiceState) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "INVALID_PARTICIPANT_VOICE_STATE",
+          error: "Participant voice state is invalid",
+        });
+        break;
+      }
+      participant.muted = voiceState.muted;
+      participant.deafened = voiceState.deafened;
+      session.muted = voiceState.muted;
+      session.deafened = voiceState.deafened;
+      ws.serializeAttachment(session);
+      for (const recipient of room.participants.values())
+        if (recipient.ws)
+          room.sendMessage(
+            recipient.ws,
+            MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE,
+            {
+              userId: participant.userId,
+              peerId: participant.peerId,
+              ...voiceState,
+            },
+          );
+      break;
+    }
     case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
       const participant = room.participants.get(
         `${session.userId}:${session.deviceId}`,
@@ -67,6 +97,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       }
       const stalePublications = [];
       const sourceSet = new Set(sources);
+      const previousSources = participant.sources || new Set();
+      const sourcesChanged =
+        previousSources.size !== sourceSet.size ||
+        [...previousSources].some((source) => !sourceSet.has(source));
       for (const [key, publication] of room.publishedSources) {
         if (
           publication.peerId === session.peerId &&
@@ -79,6 +113,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       participant.sources = new Set(sources);
       session.sources = [...participant.sources];
       ws.serializeAttachment(session);
+      if (!sourcesChanged && stalePublications.length === 0) break;
       room.sourceRevision++;
       await Promise.all([
         room.state.storage.put("sourceRevision", room.sourceRevision),
@@ -300,6 +335,10 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   session.channelId = claims.channelId;
   session.connectionMode = claims.connectionMode || "auto";
   session.routeEpoch = claims.routeEpoch || 0;
+  const participantKey = `${claims.sub}:${claims.deviceId}`;
+  const resumedParticipant = room.participants.get(participantKey);
+  session.muted = resumedParticipant?.muted !== false;
+  session.deafened = resumedParticipant?.deafened === true;
   const configured = room.getConfiguredProviderCapabilities();
   session.providerCapabilities = Array.isArray(data.providerCapabilities)
     ? data.providerCapabilities.filter((provider) => configured.has(provider))
@@ -310,8 +349,6 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     connectionMode: session.connectionMode,
     capabilities: session.providerCapabilities,
   });
-  const participantKey = `${claims.sub}:${claims.deviceId}`;
-  const resumedParticipant = room.participants.get(participantKey);
   room.replaceParticipantSession(participantKey, resumedParticipant, ws);
   if (room.participants.size === 0 && room.epoch === 0)
     room.commitRoute(room.createInitialRoute("room-ready"));
@@ -323,6 +360,8 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     ws,
     sources: new Set(resumedParticipant?.sources || []),
     providerCapabilities: new Set(session.providerCapabilities),
+    muted: session.muted,
+    deafened: session.deafened,
     joinedAt: resumedParticipant?.joinedAt || now,
     disconnectedAt: null,
   });
@@ -385,16 +424,24 @@ async function handleTopologyReady(room, session, data) {
 }
 
 async function handleCloudflarePublication(room, ws, session, data) {
-  if (!session.cloudflareSessionId || !data.trackName || !data.source) return;
+  const source = normalizeMediaSources([data.source])?.[0];
+  if (
+    !session.cloudflareSessionId ||
+    typeof data.trackName !== "string" ||
+    data.trackName.length === 0 ||
+    data.trackName.length > 256 ||
+    !source
+  )
+    return;
   const publication = {
     sessionId: session.cloudflareSessionId,
     trackName: data.trackName,
-    source: data.source,
+    source,
     userId: session.userId,
     peerId: session.peerId,
     closed: data.closed === true,
   };
-  const publicationKey = `${session.peerId}:${data.source}`;
+  const publicationKey = `${session.peerId}:${source}`;
   if (publication.closed) room.publishedSources.delete(publicationKey);
   else room.publishedSources.set(publicationKey, publication);
   void room.state.storage.put("publishedSources", [

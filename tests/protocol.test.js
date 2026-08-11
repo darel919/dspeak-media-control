@@ -93,6 +93,14 @@ describe("dspeak-media-control protocol", () => {
     assert.equal(
       chooseAvailableProvider({
         requestedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        availableProviders: [SFU_PROVIDER.MEDIASOUP],
+        allowDirectMediasoupFallback: true,
+      }),
+      SFU_PROVIDER.MEDIASOUP,
+    );
+    assert.equal(
+      chooseAvailableProvider({
+        requestedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
         availableProviders: [SFU_PROVIDER.CLOUDFLARE_REALTIME],
       }),
       SFU_PROVIDER.CLOUDFLARE_REALTIME,

@@ -27,3 +27,20 @@ export function normalizeMediaSources(value) {
   }
   return sources;
 }
+
+export function isVideoMediaSource(value) {
+  return value === "camera" || value === "screen";
+}
+
+export function normalizeParticipantVoiceState(value) {
+  if (
+    !value ||
+    typeof value.muted !== "boolean" ||
+    typeof value.deafened !== "boolean"
+  )
+    return null;
+  return {
+    muted: value.muted,
+    deafened: value.deafened,
+  };
+}

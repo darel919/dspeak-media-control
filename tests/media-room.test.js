@@ -4,6 +4,7 @@ import {
   MEDIA_ROUTE_KIND,
   MEDIA_CONTROL_MESSAGE_TYPES,
   SFU_PROVIDER,
+  chooseAvailableProvider,
   createP2PRoute,
   createSFURoute,
 } from "../src/protocol.js";
@@ -51,6 +52,48 @@ test("Cloudflare transitions commit after topology readiness", async () => {
 
   assert.equal(committed?.kind, MEDIA_ROUTE_KIND.SFU);
   assert.equal(committed?.provider, SFU_PROVIDER.CLOUDFLARE_REALTIME);
+});
+
+test("provider selection falls back to mediasoup when Cloudflare is unavailable", () => {
+  assert.equal(
+    chooseAvailableProvider({
+      requestedProvider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+      availableProviders: [SFU_PROVIDER.MEDIASOUP],
+      allowDirectMediasoupFallback: true,
+    }),
+    SFU_PROVIDER.MEDIASOUP,
+  );
+});
+
+test("duplicate media source announcements do not churn the source revision", async () => {
+  const instance = room();
+  const ws = { serializeAttachment() {}, send() {} };
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    sources: [],
+  };
+  instance.participants.clear();
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws,
+    sources: new Set(),
+  });
+  instance.isCurrentParticipantSession = () => true;
+
+  const message = {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+    data: { sources: ["audio", "camera"] },
+  };
+  await handleRoomMessage(instance, ws, session, message);
+  await handleRoomMessage(instance, ws, session, message);
+
+  assert.equal(instance.sourceRevision, 1);
+  assert.deepEqual(session.sources, ["audio", "camera"]);
 });
 
 test("mediasoup transitions still require provider readiness", async () => {

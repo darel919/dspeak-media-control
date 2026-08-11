@@ -152,19 +152,18 @@ export function chooseAvailableProvider({
   availableProviders = [],
   excludedProvider = null,
   registrySelectionSucceeded = false,
+  allowDirectMediasoupFallback = false,
 }) {
   const available = new Set(availableProviders);
   if (excludedProvider) available.delete(excludedProvider);
-  if (
-    !registrySelectionSucceeded &&
-    requestedProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME &&
-    !available.has(SFU_PROVIDER.CLOUDFLARE_REALTIME)
-  )
-    return null;
   if (requestedProvider && available.has(requestedProvider))
     return requestedProvider;
   if (available.has(SFU_PROVIDER.CLOUDFLARE_REALTIME))
     return SFU_PROVIDER.CLOUDFLARE_REALTIME;
-  if (available.has(SFU_PROVIDER.MEDIASOUP)) return SFU_PROVIDER.MEDIASOUP;
+  if (
+    available.has(SFU_PROVIDER.MEDIASOUP) &&
+    (registrySelectionSucceeded || allowDirectMediasoupFallback)
+  )
+    return SFU_PROVIDER.MEDIASOUP;
   return null;
 }

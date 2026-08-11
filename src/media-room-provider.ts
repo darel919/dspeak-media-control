@@ -14,6 +14,7 @@ import {
   providerRegistryEnabled,
 } from "./provider-config.ts";
 import { mediaDebug } from "./debug.ts";
+import { isVideoMediaSource } from "./media-room-contracts.ts";
 
 const PROVIDER_FAILURE_COOLDOWN_MS = 30_000;
 
@@ -402,7 +403,7 @@ export async function beginTransition(
             participantCount: room.participants.size,
             hasVideo: [...room.participants.values()].some((participant) =>
               [...participant.sources].some((source) =>
-                String(source).includes("video"),
+                isVideoMediaSource(source),
               ),
             ),
             requiredSources: [],
@@ -428,7 +429,8 @@ export async function beginTransition(
   const availableProviders = getAvailableProviderCapabilities(room);
   if (
     !registrySelectionSucceeded &&
-    selectedProvider === SFU_PROVIDER.MEDIASOUP
+    selectedProvider === SFU_PROVIDER.MEDIASOUP &&
+    !isSelfHostedMediasoupConfigured(room.env)
   )
     availableProviders.delete(SFU_PROVIDER.MEDIASOUP);
   selectedProvider = chooseAvailableProvider({
@@ -436,6 +438,7 @@ export async function beginTransition(
     availableProviders,
     excludedProvider,
     registrySelectionSucceeded,
+    allowDirectMediasoupFallback: isSelfHostedMediasoupConfigured(room.env),
   });
   if (!selectedProvider) {
     room.transitionInFlight = false;

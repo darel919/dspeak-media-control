@@ -16,6 +16,7 @@ import {
   getNextProviderRecoveryAt,
   scheduleProviderRecovery,
 } from "./media-room-provider.ts";
+import { isVideoMediaSource } from "./media-room-contracts.ts";
 
 const P2P_QUALIFICATION_STABILITY_MS = 2_000;
 
@@ -41,9 +42,7 @@ export function maybeStartQualification(room) {
   const participantCount = room.participants.size;
   if (participantCount === 0) return;
   const hasVideo = [...room.participants.values()].some((participant) =>
-    [...participant.sources].some((source) =>
-      ["camera", "screen"].includes(source),
-    ),
+    [...participant.sources].some((source) => isVideoMediaSource(source)),
   );
   const connectionMode = room.getConnectionMode();
   const eligibility = checkP2PEligibility({
