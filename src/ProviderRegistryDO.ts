@@ -334,6 +334,8 @@ export class ProviderRegistryDO {
   }
 
   async alarm() {
+    await this.loadDurableState();
+
     if (!isSelfHostedMediasoupConfigured(this.env)) {
       await this.state.storage.deleteAlarm?.();
       mediaDebug(this.env, "registry.probe-skipped", {

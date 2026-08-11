@@ -125,6 +125,63 @@ test("disabled self-hosted mediasoup deletes stale probe alarms", async () => {
   assert.equal(probes, 0);
 });
 
+test("provider registry rehydrates persisted state before a cold alarm", async () => {
+  const provider = {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://singapore.example",
+    healthUrl: "https://singapore.example/health",
+    region: "sg",
+    priority: 1,
+    healthy: true,
+    failures: 0,
+    recoveringSince: null,
+  };
+  const circuitBreaker = {
+    state: "closed",
+    failureCount: 0,
+    lastFailure: 0,
+    nextAttempt: 0,
+  };
+  const values = new Map([
+    ["providers", { "sfu-singapore": provider }],
+    ["circuitBreakers", { "sfu-singapore": circuitBreaker }],
+  ]);
+  const probes = [];
+  const storage = {
+    get: async (key) => values.get(key) ?? null,
+    put: async (key, value) => values.set(key, value),
+    setAlarm: async () => {},
+  };
+  const instance = new ProviderRegistryDO(
+    { storage },
+    {
+      DSPEAK_SFU_ENABLED: "true",
+      DSPEAK_SFU_SIGNALING_URL: "wss://sfu.example.net/v1/ws",
+    },
+  );
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    probes.push(String(url));
+    return new Response("ok", { status: 200 });
+  };
+
+  try {
+    await instance.alarm();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(instance.stateLoaded, true);
+  assert.equal(instance.providers.size, 1);
+  assert.equal(instance.providers.get("sfu-singapore").id, "sfu-singapore");
+  assert.deepEqual(Object.keys(values.get("providers")), ["sfu-singapore"]);
+  assert.deepEqual(Object.keys(values.get("circuitBreakers")), [
+    "sfu-singapore",
+  ]);
+  assert.deepEqual(probes, ["https://singapore.example/health"]);
+});
+
 test("provider registry does not select a half-open provider before retry time", async () => {
   const instance = registry();
   instance.stateLoaded = true;
