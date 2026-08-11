@@ -323,8 +323,59 @@ export class MediaRoomDO {
     if (typeof qualificationParticipantSignature === "string")
       this.qualificationParticipantSignature =
         qualificationParticipantSignature;
+    const hasPersistedRoomState = Boolean(
+      route ||
+      (Number.isSafeInteger(epoch) && epoch > 0) ||
+      (Number.isSafeInteger(sourceRevision) && sourceRevision > 0) ||
+      pendingRoute ||
+      pendingStartedAt ||
+      publishedSources?.length ||
+      providerConfig ||
+      providerHealth,
+    );
+    const sockets = this.state.getWebSockets?.() || [];
+    for (const ws of sockets) this.getSession(ws);
+    if (
+      hasPersistedRoomState &&
+      !sockets.length &&
+      this.participants.size === 0
+    )
+      await this.resetDormantRoomState();
     this.stateLoaded = true;
-    for (const ws of this.state.getWebSockets?.() || []) this.getSession(ws);
+  }
+
+  async resetDormantRoomState() {
+    this.sourceRevision++;
+    this.epoch = Math.max(this.epoch, Number(this.route.epoch) || 0) + 1;
+    this.route = createLocalRoute(
+      this.epoch,
+      this.sourceRevision,
+      "room-rehydrated",
+    );
+    this.pendingRoute = null;
+    this.pendingStartedAt = 0;
+    this.publishedSources.clear();
+    this.providerHealth.clear();
+    this.providerConfig = null;
+    this.qualifiedParticipantSignature = null;
+    this.qualificationStartedAt = 0;
+    this.qualificationFallbackRoute = null;
+    this.qualificationParticipantSignature = null;
+    this.qoeMetrics.clear();
+    await Promise.all([
+      this.state.storage.put("route", this.route),
+      this.state.storage.put("epoch", this.epoch),
+      this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put("publishedSources", []),
+      this.state.storage.put("providerHealth", {}),
+      this.state.storage.put("qualifiedParticipantSignature", null),
+      this.state.storage.put("qualificationStartedAt", 0),
+      this.state.storage.delete("pendingRoute"),
+      this.state.storage.delete("pendingStartedAt"),
+      this.state.storage.delete("providerConfig"),
+      this.state.storage.delete("qualificationFallbackRoute"),
+      this.state.storage.delete("qualificationParticipantSignature"),
+    ]);
   }
 
   getSession(ws) {

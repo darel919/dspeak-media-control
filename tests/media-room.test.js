@@ -55,6 +55,45 @@ test("Cloudflare transitions commit after topology readiness", async () => {
   assert.equal(committed?.provider, SFU_PROVIDER.CLOUDFLARE_REALTIME);
 });
 
+test("dormant room rehydration retires a persisted route with no live sockets", async () => {
+  const values = new Map([
+    [
+      "route",
+      createSFURoute(SFU_PROVIDER.CLOUDFLARE_REALTIME, 8, 3, "active-sfu"),
+    ],
+    ["epoch", 8],
+    ["sourceRevision", 3],
+    ["publishedSources", [{ peerId: "old-peer", source: "microphone" }]],
+    [
+      "providerHealth",
+      { [SFU_PROVIDER.CLOUDFLARE_REALTIME]: { healthy: true } },
+    ],
+    ["providerConfig", { id: "cloudflare-primary" }],
+  ]);
+  const storage = {
+    get: async (key) => values.get(key) ?? null,
+    put: async (key, value) => values.set(key, value),
+    delete: async (key) => values.delete(key),
+  };
+  const instance = new MediaRoomDO(
+    { storage, getWebSockets: () => [] },
+    {
+      CLOUDFLARE_REALTIME_APP_ID: "app",
+      CLOUDFLARE_REALTIME_APP_SECRET: "secret",
+    },
+  );
+
+  await instance.loadDurableState();
+
+  assert.equal(instance.participants.size, 0);
+  assert.equal(instance.route.kind, MEDIA_ROUTE_KIND.LOCAL);
+  assert.equal(instance.route.reason, "room-rehydrated");
+  assert.equal(instance.route.epoch, 9);
+  assert.equal(instance.sourceRevision, 4);
+  assert.deepEqual(values.get("publishedSources"), []);
+  assert.equal(values.has("providerConfig"), false);
+});
+
 test("provider selection falls back to mediasoup when Cloudflare is unavailable", () => {
   assert.equal(
     chooseAvailableProvider({
@@ -838,7 +877,7 @@ test("a failed P2P qualification restores a healthy fallback SFU", async () => {
     providerCapabilities: new Set([SFU_PROVIDER.CLOUDFLARE_REALTIME]),
   });
 
-  instance.handleP2PFailure(
+  await instance.handleP2PFailure(
     { userId: "user-1", deviceId: "device-1" },
     "ice-timeout",
   );

@@ -44,6 +44,8 @@ function getChannelId(url: URL) {
   if (queryChannelId) return normalizeChannelId(queryChannelId);
 
   const segments = url.pathname.split("/").filter(Boolean);
+  if (segments[0] === "media-control" && segments[1])
+    return normalizeChannelId(segments[1]);
   if (segments[0] === "room" && segments[1])
     return normalizeChannelId(segments[1]);
   if (segments[0] === "v1" && segments[1] === "room" && segments[2])
@@ -64,4 +66,4 @@ function normalizeChannelId(value: string) {
 
 export default app;
 
-export { MediaRoomDO, ProviderRegistryDO };
+export { MediaRoomDO, ProviderRegistryDO, getChannelId };

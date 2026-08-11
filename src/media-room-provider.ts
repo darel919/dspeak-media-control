@@ -251,7 +251,7 @@ export async function handleCloudflareRequest(room, ws, session, data) {
   );
 }
 
-export function handleP2PFailure(room, session, reason) {
+export async function handleP2PFailure(room, session, reason) {
   if (room.route.kind !== MEDIA_ROUTE_KIND.P2P || room.route.path !== "direct")
     return;
   const participant = room.participants.get(
@@ -270,12 +270,12 @@ export function handleP2PFailure(room, session, reason) {
     qualificationFallback?.provider &&
     getAvailableProviderCapabilities(room).has(qualificationFallback.provider)
   ) {
-    void room.restoreQualificationRoute(`p2p-failed-${reason}`);
+    await room.restoreQualificationRoute(`p2p-failed-${reason}`);
     return;
   }
   if (qualificationFallback) {
     room.qualificationFallbackRoute = null;
-    void room.state.storage.delete("qualificationFallbackRoute");
+    await room.state.storage.delete("qualificationFallbackRoute");
   }
   const available = getAvailableProviderCapabilities(room);
   const fallback = available.has(SFU_PROVIDER.CLOUDFLARE_REALTIME)
@@ -284,7 +284,7 @@ export function handleP2PFailure(room, session, reason) {
       ? SFU_PROVIDER.MEDIASOUP
       : null;
   if (fallback) {
-    void beginTransition(room, fallback, `p2p-failed-${reason}`);
+    await beginTransition(room, fallback, `p2p-failed-${reason}`);
     return;
   }
   room.sendMessage(participantWs, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
@@ -355,14 +355,14 @@ export async function handleProviderFailure(room, provider, reason) {
     room.pendingStartedAt = 0;
     room.providerReadiness.clear();
     room.transitionReadiness.clear();
-    void Promise.all([
+    await Promise.all([
       room.state.storage.delete("pendingRoute"),
       room.state.storage.delete("pendingStartedAt"),
     ]);
   }
   if (room.qualificationFallbackRoute?.provider === provider) {
     room.qualificationFallbackRoute = null;
-    void room.state.storage.delete("qualificationFallbackRoute");
+    await room.state.storage.delete("qualificationFallbackRoute");
   }
   await beginTransition(room, alternate, `provider-failed-${reason}`, provider);
 }
@@ -471,7 +471,6 @@ export async function beginTransition(
     return;
   }
   room.providerConfig = selectedProviderConfig;
-  void room.state.storage.put("providerConfig", room.providerConfig);
   const targetRoute = createSFURoute(
     selectedProvider,
     room.epoch + 1,
@@ -480,7 +479,8 @@ export async function beginTransition(
   );
   room.pendingRoute = targetRoute;
   room.pendingStartedAt = Date.now();
-  void Promise.all([
+  await Promise.all([
+    room.state.storage.put("providerConfig", room.providerConfig),
     room.state.storage.put("pendingRoute", targetRoute),
     room.state.storage.put("pendingStartedAt", room.pendingStartedAt),
   ]);

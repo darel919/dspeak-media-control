@@ -185,7 +185,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         failed: true,
         reason: data.reason || "p2p-failed",
       });
-      handleP2PFailure(room, session, data.reason);
+      await handleP2PFailure(room, session, data.reason);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_QOE: {
       const participant = room.participants.get(
@@ -403,7 +403,7 @@ async function handleProviderReady(room, ws, session, data) {
     unhealthyUntil: 0,
     updatedAt: Date.now(),
   });
-  void room.state.storage.put(
+  await room.state.storage.put(
     "providerHealth",
     Object.fromEntries(room.providerHealth),
   );
@@ -445,7 +445,7 @@ async function handleCloudflarePublication(room, ws, session, data) {
   const publicationKey = `${session.peerId}:${source}`;
   if (publication.closed) room.publishedSources.delete(publicationKey);
   else room.publishedSources.set(publicationKey, publication);
-  void room.state.storage.put("publishedSources", [
+  await room.state.storage.put("publishedSources", [
     ...room.publishedSources.values(),
   ]);
   for (const participant of room.participants.values())

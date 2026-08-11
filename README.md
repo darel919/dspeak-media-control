@@ -128,13 +128,15 @@ warning: wrangler secret put with --env requires `wrangler.toml` env config
 
 ## Endpoints / protocol
 
-| Endpoint                       | Purpose                              |
-| ------------------------------ | ------------------------------------ |
-| `GET /healthz`                 | Worker liveness                      |
-| `WS /media-control/:channelId` | Upgrade to `MediaRoomDO(channelId)`  |
-| `POST /registry/register`      | Register a provider (admin only)     |
-| `POST /registry/select`        | Select a route (internal/admin only) |
-| `GET /registry/health`         | Inspect providers (admin only)       |
+| Endpoint                        | Purpose                              |
+| ------------------------------- | ------------------------------------ |
+| `GET /healthz`                  | Worker liveness                      |
+| `WS /media-control/:channelId`  | Upgrade to `MediaRoomDO(channelId)`  |
+| `POST /registry/register`       | Register a provider (admin only)     |
+| `POST /registry/select`         | Select a route (internal/admin only) |
+| `GET /registry/health`          | Inspect providers (admin only)       |
+| `POST /registry/report-failure` | Report a provider failure            |
+| `POST /registry/report-success` | Reset a recovered provider breaker   |
 
 ### WebSocket protocol
 
@@ -145,8 +147,11 @@ Protocol version: **919** — hello handshake family (`hello919`, `hi919`), same
 as the media signaling protocol in the main app.
 
 The mediasoup fallback is available only when a healthy `dspeak-sfu` instance
-is registered at `/registry/register`. Cloudflare Realtime does not use a
-provider ticket; its credentials remain Worker secrets.
+is registered at `/registry/register`. Registration accepts `provider`,
+`region`, and numeric `priority`; selection returns the concrete provider
+instance after health, circuit, region, and priority checks. Cloudflare
+Realtime does not use a provider ticket; its credentials remain Worker
+secrets.
 
 ## Tests
 

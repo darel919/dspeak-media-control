@@ -40,6 +40,7 @@ See `.env.example` for the full variable list and `wrangler.toml` for bindings.
 | `GET /registry/health`          | Provider health + circuit breakers  |
 | `POST /registry/select`         | Route selection for a room          |
 | `POST /registry/report-failure` | Correlated failure reporting        |
+| `POST /registry/report-success` | Reset a recovered provider breaker  |
 
 ## WebSocket/media protocol
 

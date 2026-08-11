@@ -32,6 +32,10 @@ export class ProviderRegistryDO {
       return this.handleReportFailure(request);
     }
 
+    if (url.pathname === "/report-success" && request.method === "POST") {
+      return this.handleReportSuccess(request);
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -46,9 +50,23 @@ export class ProviderRegistryDO {
         { status: 503 },
       );
     const data = await request.json();
-    const { providerId, signalingUrl, healthUrl, region, priority = 10 } = data;
+    const {
+      providerId,
+      signalingUrl,
+      healthUrl,
+      provider = SFU_PROVIDER.MEDIASOUP,
+      region,
+      priority = 10,
+    } = data;
 
-    if (!providerId || !signalingUrl || !healthUrl) {
+    if (
+      !providerId ||
+      !signalingUrl ||
+      !healthUrl ||
+      ![SFU_PROVIDER.CLOUDFLARE_REALTIME, SFU_PROVIDER.MEDIASOUP].includes(
+        provider,
+      )
+    ) {
       return new Response(
         JSON.stringify({ error: "Missing required fields" }),
         { status: 400 },
@@ -57,10 +75,11 @@ export class ProviderRegistryDO {
 
     this.providers.set(providerId, {
       id: providerId,
+      provider,
       signalingUrl,
       healthUrl,
       region: region || "unknown",
-      priority,
+      priority: normalizePriority(priority),
       healthy: true,
       lastCheck: Date.now(),
       failures: 0,
@@ -114,17 +133,20 @@ export class ProviderRegistryDO {
       requiredSources,
       excludedProvider,
       qoeCandidates = [],
+      preferredRegion,
+      excludedProviderId,
     } = data;
 
-    let candidates = [...this.providers.values()].filter((p) => p.healthy);
+    let candidates = [...this.providers.values()].filter(
+      (provider) => provider.healthy,
+    );
     if (excludedProvider)
-      candidates = candidates.filter((provider) =>
-        excludedProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME
-          ? !provider.id.includes("cloudflare")
-          : !(
-              provider.id.includes("mediasoup") ||
-              provider.id.includes("selfhost")
-            ),
+      candidates = candidates.filter(
+        (provider) => getProviderFamily(provider) !== excludedProvider,
+      );
+    if (excludedProviderId)
+      candidates = candidates.filter(
+        (provider) => provider.id !== excludedProviderId,
       );
 
     candidates = candidates.filter((p) => {
@@ -160,22 +182,18 @@ export class ProviderRegistryDO {
           candidate.paths.every((path) =>
             Number.isFinite(Number(path.rttMs)),
           ) &&
-          candidates.some((provider) =>
-            candidate.provider === SFU_PROVIDER.CLOUDFLARE_REALTIME
-              ? provider.id.includes("cloudflare")
-              : (provider.id.includes("mediasoup") ||
-                  provider.id.includes("selfhost")) &&
-                candidate.provider === SFU_PROVIDER.MEDIASOUP,
+          candidates.some(
+            (provider) => getProviderFamily(provider) === candidate.provider,
           ),
       ),
     );
     const qoeProvider = rankedQoe[0]?.provider;
     if (qoeProvider) {
-      const provider = candidates.find((candidate) =>
-        qoeProvider === SFU_PROVIDER.CLOUDFLARE_REALTIME
-          ? candidate.id.includes("cloudflare")
-          : candidate.id.includes("mediasoup") ||
-            candidate.id.includes("selfhost"),
+      const provider = selectProviderInstance(
+        candidates,
+        qoeProvider,
+        rankedQoe[0],
+        preferredRegion,
       );
       if (provider)
         return new Response(
@@ -186,7 +204,12 @@ export class ProviderRegistryDO {
         );
     }
 
-    const cfProvider = candidates.find((p) => p.id.includes("cloudflare"));
+    const cfProvider = selectProviderInstance(
+      candidates,
+      SFU_PROVIDER.CLOUDFLARE_REALTIME,
+      null,
+      preferredRegion,
+    );
     if (cfProvider) {
       return new Response(
         JSON.stringify({
@@ -199,8 +222,11 @@ export class ProviderRegistryDO {
       );
     }
 
-    const msProvider = candidates.find(
-      (p) => p.id.includes("mediasoup") || p.id.includes("selfhost"),
+    const msProvider = selectProviderInstance(
+      candidates,
+      SFU_PROVIDER.MEDIASOUP,
+      null,
+      preferredRegion,
     );
     if (msProvider) {
       return new Response(
@@ -252,6 +278,31 @@ export class ProviderRegistryDO {
     return new Response(JSON.stringify({ success: true, circuitBreaker: cb }));
   }
 
+  async handleReportSuccess(request) {
+    if (!this.isAuthorized(request))
+      return new Response("Unauthorized", { status: 401 });
+    const data = await request.json();
+    const providerId = String(data.providerId || "");
+    const cb = this.circuitBreakers.get(providerId);
+    const provider = this.providers.get(providerId);
+    if (!cb || !provider)
+      return new Response(JSON.stringify({ error: "Provider not found" }), {
+        status: 404,
+      });
+
+    const now = Date.now();
+    cb.state = "closed";
+    cb.failureCount = 0;
+    cb.lastFailure = 0;
+    cb.nextAttempt = 0;
+    provider.healthy = true;
+    provider.failures = 0;
+    provider.recoveringSince = null;
+    provider.lastCheck = now;
+    await this.persist();
+    return new Response(JSON.stringify({ success: true, circuitBreaker: cb }));
+  }
+
   async persist() {
     await Promise.all([
       this.state.storage.put("providers", Object.fromEntries(this.providers)),
@@ -297,14 +348,22 @@ export class ProviderRegistryDO {
         });
         const healthy = response.ok;
         const wasHealthy = provider.healthy;
+        const wasOpen = this.circuitBreakers.get(id)?.state === "open";
         provider.healthy = healthy;
         provider.lastCheck = Date.now();
-        if (healthy && !wasHealthy) provider.recoveringSince = Date.now();
+        if (healthy && (!wasHealthy || wasOpen))
+          provider.recoveringSince = Date.now();
 
         const cb = this.circuitBreakers.get(id);
         if (healthy && cb && cb.state === "open") {
           cb.state = "half-open";
           cb.nextAttempt = Date.now();
+        } else if (healthy && cb && cb.state === "half-open") {
+          cb.state = "closed";
+          cb.failureCount = 0;
+          cb.lastFailure = 0;
+          cb.nextAttempt = 0;
+          provider.failures = 0;
         }
       } catch {
         provider.healthy = false;
@@ -316,6 +375,48 @@ export class ProviderRegistryDO {
     });
     await this.persist();
 
-    this.state.storage.setAlarm(Date.now() + 60000);
+    await this.state.storage.setAlarm?.(Date.now() + 60000);
   }
+}
+
+function getProviderFamily(provider) {
+  if (provider.provider === SFU_PROVIDER.CLOUDFLARE_REALTIME)
+    return SFU_PROVIDER.CLOUDFLARE_REALTIME;
+  if (provider.provider === SFU_PROVIDER.MEDIASOUP)
+    return SFU_PROVIDER.MEDIASOUP;
+  if (provider.id?.includes("cloudflare"))
+    return SFU_PROVIDER.CLOUDFLARE_REALTIME;
+  return SFU_PROVIDER.MEDIASOUP;
+}
+
+function selectProviderInstance(
+  candidates,
+  family,
+  qoeCandidate,
+  preferredRegion,
+) {
+  const familyCandidates = candidates.filter(
+    (candidate) => getProviderFamily(candidate) === family,
+  );
+  if (!familyCandidates.length) return null;
+  const qoeProviderId = qoeCandidate?.providerId;
+  const qoeCandidates = qoeProviderId
+    ? familyCandidates.filter((candidate) => candidate.id === qoeProviderId)
+    : familyCandidates;
+  const ranked = (qoeCandidates.length ? qoeCandidates : familyCandidates).sort(
+    (left, right) => {
+      const leftRegion = preferredRegion && left.region === preferredRegion;
+      const rightRegion = preferredRegion && right.region === preferredRegion;
+      if (leftRegion !== rightRegion) return leftRegion ? -1 : 1;
+      if (left.priority !== right.priority)
+        return left.priority - right.priority;
+      return left.id.localeCompare(right.id);
+    },
+  );
+  return ranked[0] || null;
+}
+
+function normalizePriority(value) {
+  const priority = Number(value);
+  return Number.isFinite(priority) ? priority : 10;
 }

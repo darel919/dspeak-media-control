@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ProviderRegistryDO } from "../src/ProviderRegistryDO.ts";
+import { SFU_PROVIDER } from "../src/protocol.js";
 import { isSelfHostedMediasoupConfigured } from "../src/provider-config.ts";
 
 function registry() {
@@ -19,14 +20,14 @@ function registry() {
   );
 }
 
-function request() {
+function request(data = {}) {
   return new Request("https://registry/select", {
     method: "POST",
     headers: {
       Authorization: "Bearer admin",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ connectionMode: "auto" }),
+    body: JSON.stringify({ connectionMode: "auto", ...data }),
   });
 }
 
@@ -162,4 +163,174 @@ test("provider registry allows one half-open retry after cooldown", async () => 
 
   assert.equal(response.status, 200);
   assert.equal(body.route.provider, "cloudflare-realtime");
+});
+
+test("provider registry selects a concrete provider by region and priority", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://singapore.example",
+    healthUrl: "https://singapore.example/health",
+    region: "sg",
+    priority: 20,
+    healthy: true,
+  });
+  instance.providers.set("sfu-frankfurt", {
+    id: "sfu-frankfurt",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://frankfurt.example",
+    healthUrl: "https://frankfurt.example/health",
+    region: "eu",
+    priority: 1,
+    healthy: true,
+  });
+  instance.circuitBreakers.set("sfu-singapore", { state: "closed" });
+  instance.circuitBreakers.set("sfu-frankfurt", { state: "closed" });
+
+  const response = await instance.handleSelect(
+    request({ preferredRegion: "sg" }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.provider.id, "sfu-singapore");
+  assert.equal(body.route.provider, SFU_PROVIDER.MEDIASOUP);
+});
+
+test("provider registry recognizes arbitrary mediasoup instance ids", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://singapore.example",
+    healthUrl: "https://singapore.example/health",
+    healthy: true,
+    priority: 10,
+  });
+  instance.circuitBreakers.set("sfu-singapore", { state: "closed" });
+
+  const response = await instance.handleSelect(request());
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.provider.id, "sfu-singapore");
+  assert.equal(body.route.provider, SFU_PROVIDER.MEDIASOUP);
+});
+
+test("provider registry honors a QoE candidate for a concrete instance", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://singapore.example",
+    healthUrl: "https://singapore.example/health",
+    priority: 20,
+    healthy: true,
+  });
+  instance.providers.set("sfu-frankfurt", {
+    id: "sfu-frankfurt",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://frankfurt.example",
+    healthUrl: "https://frankfurt.example/health",
+    priority: 1,
+    healthy: true,
+  });
+  instance.circuitBreakers.set("sfu-singapore", { state: "closed" });
+  instance.circuitBreakers.set("sfu-frankfurt", { state: "closed" });
+
+  const response = await instance.handleSelect(
+    request({
+      qoeCandidates: [
+        {
+          provider: SFU_PROVIDER.MEDIASOUP,
+          providerId: "sfu-singapore",
+          readyParticipants: 1,
+          requiredParticipants: 1,
+          paths: [{ rttMs: 20 }],
+        },
+      ],
+    }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.provider.id, "sfu-singapore");
+});
+
+test("provider registry closes a breaker after consecutive healthy probes", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    healthUrl: "https://singapore.example/health",
+    healthy: false,
+    failures: 3,
+  });
+  instance.circuitBreakers.set("sfu-singapore", {
+    state: "open",
+    failureCount: 3,
+    lastFailure: Date.now() - 60_000,
+    nextAttempt: Date.now(),
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("ok", { status: 200 });
+
+  try {
+    await instance.alarm();
+    assert.equal(
+      instance.circuitBreakers.get("sfu-singapore").state,
+      "half-open",
+    );
+    await instance.alarm();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(instance.circuitBreakers.get("sfu-singapore"), {
+    state: "closed",
+    failureCount: 0,
+    lastFailure: 0,
+    nextAttempt: 0,
+  });
+  assert.equal(instance.providers.get("sfu-singapore").failures, 0);
+});
+
+test("provider registry supports an explicit success report", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    healthy: false,
+    failures: 4,
+    recoveringSince: Date.now(),
+  });
+  instance.circuitBreakers.set("sfu-singapore", {
+    state: "half-open",
+    failureCount: 4,
+    lastFailure: Date.now(),
+    nextAttempt: Date.now(),
+  });
+
+  const response = await instance.handleReportSuccess(
+    new Request("https://registry/report-success", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer admin",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ providerId: "sfu-singapore" }),
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(instance.circuitBreakers.get("sfu-singapore").state, "closed");
+  assert.equal(instance.circuitBreakers.get("sfu-singapore").failureCount, 0);
+  assert.equal(instance.providers.get("sfu-singapore").healthy, true);
+  assert.equal(instance.providers.get("sfu-singapore").recoveringSince, null);
 });

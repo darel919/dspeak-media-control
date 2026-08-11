@@ -6,7 +6,12 @@ let providerSigningKeyCache = null;
 function base64ToPEM(base64, label) {
   if (!base64) return null;
   if (base64.includes("BEGIN")) return base64;
-  const body = base64.replace(/\s+/g, "").replace(/.{64}/g, "$&\n");
+  const normalized = base64.replace(/\s+/g, "");
+  try {
+    const decoded = atob(normalized);
+    if (decoded.includes("BEGIN")) return decoded;
+  } catch {}
+  const body = normalized.replace(/.{64}/g, "$&\n");
   return `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----\n`;
 }
 
@@ -32,10 +37,12 @@ export async function getProviderSigningKey(env) {
 
 export async function verifyMediaTicket(token, env) {
   const key = await getMediaVerifyKey(env);
+  const issuer = String(env.MEDIA_CONTROL_ISSUER || "dspeak-media-control");
   const { payload } = await jwtVerify(token, key, {
-    issuer: [env.MEDIA_CONTROL_ISSUER, "dspeak-media-control"],
+    issuer,
     audience: "dspeak-media-control",
     clockTolerance: 5,
+    requiredClaims: ["exp", "sub", "deviceId", "channelId"],
   });
   return payload;
 }
