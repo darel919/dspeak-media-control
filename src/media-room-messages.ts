@@ -268,15 +268,14 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         Number(data.sourceRevision) === room.pendingRoute.sourceRevision &&
         matchesProviderIdentity(room.pendingRoute, data)
       )
-        await handleProviderFailure(
-          room,
-          room.pendingRoute.provider,
-          data.reason || "provider-transition-failed",
-          data.providerId || null,
-          Number(data.epoch),
-          Number(data.sourceRevision),
-          room.pendingRoute,
-        );
+        await handleProviderFailure(room, {
+          provider: room.pendingRoute.provider,
+          reason: data.reason || "provider-transition-failed",
+          providerId: data.providerId || null,
+          eventEpoch: Number(data.epoch),
+          sourceRevision: Number(data.sourceRevision),
+          failedRoute: room.pendingRoute,
+        });
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE: {
       mediaDebug(room.env, "room.provider-failure", {
@@ -314,15 +313,14 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           room.providerReadiness.clear();
           room.transitionReadiness.clear();
         }
-        await handleProviderFailure(
-          room,
-          data.provider,
-          data.reason || "client-provider-failure",
-          data.providerId || null,
-          Number(data.epoch),
+        await handleProviderFailure(room, {
+          provider: data.provider,
+          reason: data.reason || "client-provider-failure",
+          providerId: data.providerId || null,
+          eventEpoch: Number(data.epoch),
           sourceRevision,
           failedRoute,
-        );
+        });
       }
       break;
     }

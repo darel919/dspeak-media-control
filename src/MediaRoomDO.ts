@@ -260,14 +260,14 @@ export class MediaRoomDO {
       void this.beginTransition(recoveryProvider, "provider-cooldown-expired");
     this.scheduleProviderRecovery(now);
     if (this.pendingRoute && now - this.pendingStartedAt > 15_000)
-      await this.handleProviderFailure(
-        this.pendingRoute.provider,
-        "provider-prepare-timeout",
-        this.pendingRoute.providerId,
-        this.pendingRoute.epoch,
-        this.pendingRoute.sourceRevision,
-        this.pendingRoute,
-      );
+      await this.handleProviderFailure({
+        provider: this.pendingRoute.provider,
+        reason: "provider-prepare-timeout",
+        providerId: this.pendingRoute.providerId,
+        eventEpoch: this.pendingRoute.epoch,
+        sourceRevision: this.pendingRoute.sourceRevision,
+        failedRoute: this.pendingRoute,
+      });
   }
 
   async loadDurableState() {

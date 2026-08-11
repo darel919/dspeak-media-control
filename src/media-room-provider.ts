@@ -383,12 +383,14 @@ export async function handleP2PFailure(room, session, reason) {
 
 export async function handleProviderFailure(
   room,
-  provider,
-  reason,
-  failedProviderId = null,
-  failedEpoch = null,
-  failedSourceRevision = null,
-  failedRoute = null,
+  {
+    provider,
+    reason,
+    providerId: failedProviderId = null,
+    eventEpoch: failedEpoch = null,
+    sourceRevision: failedSourceRevision = null,
+    failedRoute = null,
+  } = {},
 ) {
   if (!provider) return;
   const normalizedEpoch =
@@ -704,15 +706,14 @@ export async function beginTransition(
     await issueProviderTickets(room, targetRoute);
   } catch (error) {
     room.transitionInFlight = false;
-    await handleProviderFailure(
-      room,
-      selectedProvider,
-      `provider-ticket-${error?.message || "failed"}`,
-      targetRoute.providerId,
-      targetRoute.epoch,
-      targetRoute.sourceRevision,
-      targetRoute,
-    );
+    await handleProviderFailure(room, {
+      provider: selectedProvider,
+      reason: `provider-ticket-${error?.message || "failed"}`,
+      providerId: targetRoute.providerId,
+      eventEpoch: targetRoute.epoch,
+      sourceRevision: targetRoute.sourceRevision,
+      failedRoute: targetRoute,
+    });
     return;
   }
   room.transitionInFlight = false;

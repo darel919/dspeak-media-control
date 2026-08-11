@@ -408,11 +408,10 @@ test("provider failure reports the selected registry provider identity", async (
   instance.providerConfig = { id: "provider-7" };
   instance.beginTransition = async () => {};
 
-  await handleProviderFailure(
-    instance,
-    SFU_PROVIDER.MEDIASOUP,
-    "transport-down",
-  );
+  await handleProviderFailure(instance, {
+    provider: SFU_PROVIDER.MEDIASOUP,
+    reason: "transport-down",
+  });
 
   assert.deepEqual(report, {
     providerId: "provider-7",
@@ -471,11 +470,10 @@ test("a concrete mediasoup failure fails over to another instance", async () => 
     provider: SFU_PROVIDER.MEDIASOUP,
   };
 
-  await handleProviderFailure(
-    instance,
-    SFU_PROVIDER.MEDIASOUP,
-    "transport-down",
-  );
+  await handleProviderFailure(instance, {
+    provider: SFU_PROVIDER.MEDIASOUP,
+    reason: "transport-down",
+  });
 
   const selection = requests.find(({ path }) => path === "/select");
   const health = instance.providerHealth.get("mediasoup:sfu-singapore");
