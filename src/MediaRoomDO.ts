@@ -263,6 +263,9 @@ export class MediaRoomDO {
       await this.handleProviderFailure(
         this.pendingRoute.provider,
         "provider-prepare-timeout",
+        this.pendingRoute.providerId,
+        this.pendingRoute.epoch,
+        this.pendingRoute.sourceRevision,
       );
   }
 

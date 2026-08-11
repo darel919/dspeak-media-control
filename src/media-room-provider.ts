@@ -18,6 +18,8 @@ import { isVideoMediaSource } from "./media-room-contracts.ts";
 
 const PROVIDER_FAILURE_COOLDOWN_MS = 30_000;
 export const QOE_REPORT_MAX_AGE_MS = 30_000;
+export const MAX_QOE_REPORTS_PER_PARTICIPANT = 16;
+export const MAX_QOE_PROVIDER_ID_LENGTH = 128;
 
 export function providerHealthKey(provider, providerId = null) {
   return providerId ? `${provider}:${providerId}` : provider;
@@ -379,17 +381,71 @@ export async function handleP2PFailure(room, session, reason) {
   });
 }
 
-export async function handleProviderFailure(room, provider, reason) {
+export async function handleProviderFailure(
+  room,
+  provider,
+  reason,
+  failedProviderId = null,
+  failedEpoch = null,
+  failedSourceRevision = null,
+) {
   if (!provider) return;
+  const normalizedEpoch =
+    failedEpoch == null && failedEpoch !== 0
+      ? null
+      : Number.isSafeInteger(Number(failedEpoch))
+        ? Number(failedEpoch)
+        : null;
+  const normalizedSourceRevision =
+    failedSourceRevision == null && failedSourceRevision !== 0
+      ? null
+      : Number.isSafeInteger(Number(failedSourceRevision))
+        ? Number(failedSourceRevision)
+        : null;
+  const routeMatchesFailure = (route) => {
+    if (!route || route.provider !== provider) return false;
+    if (
+      route.providerId
+        ? route.providerId !== failedProviderId
+        : failedProviderId
+    )
+      return false;
+    if (normalizedEpoch !== null && Number(route.epoch) !== normalizedEpoch)
+      return false;
+    if (
+      normalizedSourceRevision !== null &&
+      Number(route.sourceRevision) !== normalizedSourceRevision
+    )
+      return false;
+    return true;
+  };
+  const pendingFailed = routeMatchesFailure(room.pendingRoute);
+  const activeFailed = routeMatchesFailure(room.route);
+  const qualificationFallbackFailed = routeMatchesFailure(
+    room.qualificationFallbackRoute,
+  );
+  const failedRoute = pendingFailed
+    ? room.pendingRoute
+    : activeFailed
+      ? room.route
+      : qualificationFallbackFailed
+        ? room.qualificationFallbackRoute
+        : null;
   const providerId =
-    (room.pendingRoute?.provider === provider
-      ? room.pendingRoute.providerId
-      : null) ||
-    (room.route?.provider === provider ? room.route.providerId : null) ||
+    failedProviderId ||
+    failedRoute?.providerId ||
     (room.providerConfig?.provider === provider
       ? room.providerConfig.id
       : null);
-  const epoch = room.pendingRoute?.epoch || room.route.epoch;
+  const epoch =
+    normalizedEpoch ??
+    failedRoute?.epoch ??
+    room.pendingRoute?.epoch ??
+    room.route.epoch;
+  const sourceRevision =
+    normalizedSourceRevision ??
+    failedRoute?.sourceRevision ??
+    room.sourceRevision;
   room.providerHealth.set(providerHealthKey(provider, providerId), {
     healthy: false,
     reason,
@@ -411,7 +467,7 @@ export async function handleProviderFailure(room, provider, reason) {
         provider,
         providerId: providerId || undefined,
         epoch,
-        sourceRevision: room.sourceRevision,
+        sourceRevision,
         reason,
       },
     );
@@ -455,7 +511,7 @@ export async function handleProviderFailure(room, provider, reason) {
         : isCloudflareRealtimeConfigured(room.env)
           ? SFU_PROVIDER.CLOUDFLARE_REALTIME
           : null;
-  if (room.pendingRoute?.provider === provider) {
+  if (pendingFailed) {
     room.pendingRoute = null;
     room.pendingStartedAt = 0;
     room.providerReadiness.clear();
@@ -466,10 +522,7 @@ export async function handleProviderFailure(room, provider, reason) {
     ]);
   }
   const qualificationFallback = room.qualificationFallbackRoute;
-  if (
-    qualificationFallback?.provider === provider &&
-    (!providerId || qualificationFallback.providerId === providerId)
-  ) {
+  if (qualificationFallbackFailed) {
     room.qualificationFallbackRoute = null;
     await room.state.storage.delete("qualificationFallbackRoute");
   }
@@ -641,6 +694,9 @@ export async function beginTransition(
       room,
       selectedProvider,
       `provider-ticket-${error?.message || "failed"}`,
+      targetRoute.providerId,
+      targetRoute.epoch,
+      targetRoute.sourceRevision,
     );
     return;
   }

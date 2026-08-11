@@ -16,6 +16,8 @@ import {
   handleCloudflareRequest,
   handleP2PFailure,
   handleProviderFailure,
+  MAX_QOE_PROVIDER_ID_LENGTH,
+  MAX_QOE_REPORTS_PER_PARTICIPANT,
   QOE_REPORT_MAX_AGE_MS,
   providerHealthKey,
 } from "./media-room-provider.ts";
@@ -200,6 +202,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         typeof data.providerId === "string" && data.providerId.trim()
           ? data.providerId.trim()
           : null;
+      if (providerId && providerId.length > MAX_QOE_PROVIDER_ID_LENGTH) break;
       const storedReports = room.qoeMetrics.get(participant.peerId);
       const reports = storedReports instanceof Map ? storedReports : new Map();
       if (storedReports && !(storedReports instanceof Map))
@@ -233,6 +236,19 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ...(providerId ? { providerId } : {}),
       };
       reports.set(reportKey, report);
+      while (reports.size > MAX_QOE_REPORTS_PER_PARTICIPANT) {
+        let oldestKey = null;
+        let oldestReceivedAt = Number.POSITIVE_INFINITY;
+        for (const [key, candidate] of reports) {
+          const candidateReceivedAt = Number(candidate?.receivedAt);
+          if (candidateReceivedAt < oldestReceivedAt) {
+            oldestKey = key;
+            oldestReceivedAt = candidateReceivedAt;
+          }
+        }
+        if (oldestKey === null) break;
+        reports.delete(oldestKey);
+      }
       room.qoeMetrics.set(participant.peerId, reports);
       break;
     }
@@ -256,6 +272,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           room,
           room.pendingRoute.provider,
           data.reason || "provider-transition-failed",
+          data.providerId || null,
+          Number(data.epoch),
+          Number(data.sourceRevision),
         );
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE: {
@@ -283,12 +302,17 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         sourceRevision === room.sourceRevision &&
         matchesProviderIdentity(room.qualificationFallbackRoute, data);
       if (failedPending || failedActive || failedQualificationFallback) {
-        room.providerReadiness.clear();
-        room.transitionReadiness.clear();
+        if (failedPending || !room.pendingRoute) {
+          room.providerReadiness.clear();
+          room.transitionReadiness.clear();
+        }
         await handleProviderFailure(
           room,
           data.provider,
           data.reason || "client-provider-failure",
+          data.providerId || null,
+          Number(data.epoch),
+          sourceRevision,
         );
       }
       break;

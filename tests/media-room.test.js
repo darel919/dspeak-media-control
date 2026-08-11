@@ -14,6 +14,8 @@ import {
   getQoeCandidates,
   handleCloudflareRequest,
   handleProviderFailure,
+  MAX_QOE_PROVIDER_ID_LENGTH,
+  MAX_QOE_REPORTS_PER_PARTICIPANT,
   QOE_REPORT_MAX_AGE_MS,
 } from "../src/media-room-provider.ts";
 import { MediaRoomDO } from "../src/MediaRoomDO.ts";
@@ -486,6 +488,118 @@ test("a concrete mediasoup failure fails over to another instance", async () => 
   assert.equal(selection.body.excludedProvider, null);
   assert.equal(selection.body.excludedProviderId, "sfu-singapore");
   assert.equal(instance.pendingRoute.providerId, "sfu-tokyo");
+});
+
+test("a late active-instance failure does not cancel a same-family failover", async () => {
+  const instance = room();
+  instance.env.DSPEAK_SFU_ENABLED = "true";
+  instance.env.DSPEAK_SFU_SIGNALING_URL = "wss://sfu.test/socket";
+  const requests = [];
+  instance.env.PROVIDER_REGISTRY_DO = {
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (request) => {
+        const path = new URL(request.url).pathname;
+        const body = await request.json();
+        requests.push({ path, body });
+        if (path === "/report-failure")
+          return new Response(null, { status: 200 });
+        return new Response(
+          JSON.stringify({
+            route: {
+              kind: MEDIA_ROUTE_KIND.SFU,
+              provider: SFU_PROVIDER.MEDIASOUP,
+              providerId: "sfu-tokyo",
+            },
+            provider: {
+              id: "sfu-tokyo",
+              provider: SFU_PROVIDER.MEDIASOUP,
+              signalingUrl: "wss://tokyo.example",
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    }),
+  };
+  instance.route = createSFURoute(
+    SFU_PROVIDER.MEDIASOUP,
+    4,
+    0,
+    "active-sfu",
+    "sfu-singapore",
+  );
+  instance.epoch = 4;
+  instance.providerConfig = {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+  };
+  instance.participants.clear();
+  instance.sessions.clear();
+  const sockets = [];
+  for (const [index, userId] of ["user-1", "user-2"].entries()) {
+    const ws = {
+      readyState: 1,
+      send() {},
+      serializeAttachment() {},
+    };
+    const session = {
+      authenticated: true,
+      userId,
+      deviceId: `${userId}-device`,
+      channelId: "channel-1",
+      peerId: `peer-${index + 1}`,
+    };
+    sockets.push({ session, ws });
+    instance.sessions.set(ws, session);
+    instance.participants.set(`${userId}:${session.deviceId}`, {
+      ...session,
+      ws: null,
+      sources: new Set(),
+      providerCapabilities: new Set([
+        SFU_PROVIDER.CLOUDFLARE_REALTIME,
+        SFU_PROVIDER.MEDIASOUP,
+      ]),
+    });
+  }
+  instance.isCurrentParticipantSession = () => true;
+  const failure = {
+    provider: SFU_PROVIDER.MEDIASOUP,
+    providerId: "sfu-singapore",
+    epoch: 4,
+    sourceRevision: 0,
+    reason: "transport-down",
+  };
+
+  await handleRoomMessage(instance, sockets[0].ws, sockets[0].session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE,
+    data: failure,
+  });
+
+  const pendingRoute = instance.pendingRoute;
+  assert.equal(pendingRoute.providerId, "sfu-tokyo");
+  instance.providerReadiness.add("peer-2");
+  instance.transitionReadiness.add("peer-2");
+
+  await handleRoomMessage(instance, sockets[1].ws, sockets[1].session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE,
+    data: { ...failure, reason: "late-duplicate-failure" },
+  });
+
+  assert.equal(instance.pendingRoute, pendingRoute);
+  assert.equal(
+    instance.providerHealth.get("mediasoup:sfu-singapore")?.healthy,
+    false,
+  );
+  assert.equal(instance.providerHealth.has("mediasoup:sfu-tokyo"), false);
+  assert.equal(instance.providerReadiness.has("peer-2"), true);
+  assert.equal(instance.transitionReadiness.has("peer-2"), true);
+  assert.deepEqual(
+    requests
+      .filter(({ path }) => path === "/report-failure")
+      .map(({ body }) => body.providerId),
+    ["sfu-singapore", "sfu-singapore"],
+  );
 });
 
 test("P2P qualification sends a complete topology state", () => {
@@ -1074,6 +1188,52 @@ test("room forwards concrete QoE identity to registry selection", async () => {
     ["sfu-tokyo", "sfu-singapore"],
   );
   assert.equal(instance.pendingRoute.providerId, "sfu-tokyo");
+});
+
+test("room bounds per-participant QoE instance reports", async () => {
+  const instance = room();
+  const ws = { readyState: 1, send() {}, serializeAttachment() {} };
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    channelId: "channel-1",
+    peerId: "peer-1",
+  };
+  instance.sessions.set(ws, session);
+  instance.participants.set("user-1:device-1", {
+    ...session,
+    ws,
+    sources: new Set(),
+  });
+
+  for (let index = 0; index < MAX_QOE_REPORTS_PER_PARTICIPANT + 1; index++)
+    await handleRoomMessage(instance, ws, session, {
+      type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_QOE,
+      data: {
+        provider: SFU_PROVIDER.MEDIASOUP,
+        providerId: `sfu-${index}`,
+        paths: [{ rttMs: 20 + index }],
+      },
+    });
+
+  const reports = instance.qoeMetrics.get("peer-1");
+  assert.equal(reports.size, MAX_QOE_REPORTS_PER_PARTICIPANT);
+  assert.equal(reports.has("mediasoup:sfu-0"), false);
+  assert.equal(
+    reports.has(`mediasoup:sfu-${MAX_QOE_REPORTS_PER_PARTICIPANT}`),
+    true,
+  );
+
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_QOE,
+    data: {
+      provider: SFU_PROVIDER.MEDIASOUP,
+      providerId: "x".repeat(MAX_QOE_PROVIDER_ID_LENGTH + 1),
+      paths: [{ rttMs: 10 }],
+    },
+  });
+  assert.equal(reports.size, MAX_QOE_REPORTS_PER_PARTICIPANT);
 });
 
 test("Cloudflare control remains available through the active qualification fallback", async () => {
