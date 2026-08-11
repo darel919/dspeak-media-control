@@ -7,6 +7,7 @@ import {
 import { verifyMediaTicket } from "./tickets.js";
 import {
   MAX_CONTROL_MESSAGE_BYTES,
+  normalizeMediaOwnerSource,
   normalizeParticipantVoiceState,
   normalizeMediaSources,
 } from "./media-room-contracts.ts";
@@ -437,6 +438,7 @@ async function handleCloudflarePublication(room, ws, session, data) {
     sessionId: session.cloudflareSessionId,
     trackName: data.trackName,
     source,
+    ownerSource: normalizeMediaOwnerSource(source, data.ownerSource),
     userId: session.userId,
     peerId: session.peerId,
     closed: data.closed === true,

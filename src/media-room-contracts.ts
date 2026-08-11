@@ -28,6 +28,11 @@ export function normalizeMediaSources(value) {
   return sources;
 }
 
+export function normalizeMediaOwnerSource(source, value) {
+  if (source !== "screen-audio") return null;
+  return value === "system-audio" ? "system-audio" : "screen";
+}
+
 export function isVideoMediaSource(value) {
   return value === "camera" || value === "screen";
 }

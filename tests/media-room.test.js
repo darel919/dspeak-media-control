@@ -661,6 +661,64 @@ test("Cloudflare control remains available through the active qualification fall
   assert.equal(messages[0]?.data.result.sessionId, "cloudflare-session");
 });
 
+test("Cloudflare publications retain safe screen audio ownership", async () => {
+  const instance = room();
+  const sender = {
+    serializeAttachment() {},
+    send() {},
+  };
+  const recipientMessages = [];
+  const recipient = {
+    send(message) {
+      recipientMessages.push(JSON.parse(message));
+    },
+  };
+  const session = {
+    authenticated: true,
+    cloudflareSessionId: "cloudflare-session",
+    deviceId: "device-1",
+    userId: "user-1",
+    peerId: "peer-1",
+  };
+  instance.participants.clear();
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws: sender,
+  });
+  instance.participants.set("user-2:device-2", {
+    userId: "user-2",
+    deviceId: "device-2",
+    peerId: "peer-2",
+    ws: recipient,
+  });
+  instance.isCurrentParticipantSession = () => true;
+
+  await handleRoomMessage(instance, sender, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION,
+    data: {
+      trackName: "track-paired",
+      source: "screen-audio",
+    },
+  });
+  await handleRoomMessage(instance, sender, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION,
+    data: {
+      trackName: "track-system",
+      source: "screen-audio",
+      ownerSource: "system-audio",
+    },
+  });
+
+  assert.equal(recipientMessages[0].data.ownerSource, "screen");
+  assert.equal(recipientMessages[1].data.ownerSource, "system-audio");
+  assert.equal(
+    instance.publishedSources.get("peer-1:screen-audio").ownerSource,
+    "system-audio",
+  );
+});
+
 test("a failed P2P qualification restores a healthy fallback SFU", async () => {
   const instance = room();
   instance.route = createP2PRoute("direct", 5, 7, "qualifying-direct");
