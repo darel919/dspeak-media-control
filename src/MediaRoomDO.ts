@@ -483,9 +483,7 @@ export class MediaRoomDO {
       this.providerReadiness.delete(previousPeerId);
       this.transitionReadiness.delete(previousPeerId);
       this.qoeMetrics.delete(previousPeerId);
-      for (const key of this.publishedSources.keys())
-        if (key.startsWith(`${previousPeerId}:`))
-          this.publishedSources.delete(key);
+      this.retireParticipantPublications(previousPeerId);
     }
     this.qualifiedParticipantSignature = null;
     this.sourceRevision++;
@@ -508,6 +506,24 @@ export class MediaRoomDO {
       sourceRevision: this.sourceRevision,
     });
     void this.refreshPendingRouteSourceRevision();
+  }
+
+  retireParticipantPublications(peerId) {
+    const retired = [];
+    for (const [key, publication] of this.publishedSources) {
+      if (publication.peerId !== peerId) continue;
+      this.publishedSources.delete(key);
+      retired.push({ ...publication, closed: true });
+    }
+    for (const publication of retired)
+      for (const participant of this.participants.values())
+        if (participant.peerId !== peerId && participant.ws)
+          this.sendMessage(
+            participant.ws,
+            MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+            publication,
+          );
+    return retired;
   }
 
   getConfiguredProviderCapabilities() {
@@ -711,9 +727,7 @@ export class MediaRoomDO {
     this.qualificationState.delete(participant.peerId);
     this.providerReadiness.delete(participant.peerId);
     this.transitionReadiness.delete(participant.peerId);
-    for (const key of this.publishedSources.keys())
-      if (key.startsWith(`${participant.peerId}:`))
-        this.publishedSources.delete(key);
+    this.retireParticipantPublications(participant.peerId);
     void Promise.all([
       this.state.storage.put("publishedSources", [
         ...this.publishedSources.values(),

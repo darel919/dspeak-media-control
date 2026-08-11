@@ -52,7 +52,39 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       await room.relayP2PSignal(session, data, ws);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY:
+    case MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED: {
+      if (
+        Number(data.epoch) !== room.epoch ||
+        room.route.kind !== "p2p" ||
+        room.route.path !== "direct" ||
+        room.route.reason !== "qualifying-direct"
+      )
+        break;
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      if (!participant) break;
+      const qualifiedPeerIds =
+        data.qualifiedPeerIds || data.qualifiedPeers || [];
+      room.qualificationState.set(session.peerId, {
+        qualifiedPeers: new Set(qualifiedPeerIds),
+        candidateReports: Array.isArray(data.candidateReports)
+          ? data.candidateReports
+          : [],
+        ready: true,
+      });
+      session.qualifiedPeerIds = [...qualifiedPeerIds];
+      ws.serializeAttachment(session);
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED, {
+        epoch: room.epoch,
+        acknowledged: true,
+        qualifiedPeerIds: [
+          ...room.qualificationState.get(session.peerId).qualifiedPeers,
+        ],
+      });
+      room.checkQualificationComplete();
       break;
+    }
     case MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE: {
       const participant = room.participants.get(
         `${session.userId}:${session.deviceId}`,
@@ -135,39 +167,6 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       await room.refreshPendingRouteSourceRevision?.();
       room.maybeStartQualification();
       room.broadcastTopology();
-      break;
-    }
-    case MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED: {
-      if (
-        Number(data.epoch) !== room.epoch ||
-        room.route.kind !== "p2p" ||
-        room.route.path !== "direct" ||
-        room.route.reason !== "qualifying-direct"
-      )
-        break;
-      const participant = room.participants.get(
-        `${session.userId}:${session.deviceId}`,
-      );
-      if (!participant) break;
-      const qualifiedPeerIds =
-        data.qualifiedPeerIds || data.qualifiedPeers || [];
-      room.qualificationState.set(session.peerId, {
-        qualifiedPeers: new Set(qualifiedPeerIds),
-        candidateReports: Array.isArray(data.candidateReports)
-          ? data.candidateReports
-          : [],
-        ready: true,
-      });
-      session.qualifiedPeerIds = [...qualifiedPeerIds];
-      ws.serializeAttachment(session);
-      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED, {
-        epoch: room.epoch,
-        acknowledged: true,
-        qualifiedPeerIds: [
-          ...room.qualificationState.get(session.peerId).qualifiedPeers,
-        ],
-      });
-      room.checkQualificationComplete();
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED:

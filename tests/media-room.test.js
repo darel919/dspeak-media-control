@@ -12,6 +12,7 @@ import { handleRoomMessage } from "../src/media-room-messages.ts";
 import {
   getQoeCandidates,
   handleCloudflareRequest,
+  handleProviderFailure,
 } from "../src/media-room-provider.ts";
 import { MediaRoomDO } from "../src/MediaRoomDO.ts";
 
@@ -241,6 +242,12 @@ test("replacing a participant session retires its old media state", () => {
     },
   };
   const newSocket = {};
+  const recipientMessages = [];
+  const recipient = {
+    send(message) {
+      recipientMessages.push(JSON.parse(message));
+    },
+  };
   const participant = {
     userId: "user-1",
     deviceId: "device-1",
@@ -254,9 +261,16 @@ test("replacing a participant session retires its old media state", () => {
     peerId: "old-peer",
   });
   instance.participants.set("user-1:device-1", participant);
+  instance.participants.set("user-2:device-2", {
+    userId: "user-2",
+    deviceId: "device-2",
+    peerId: "recipient-peer",
+    ws: recipient,
+  });
   instance.publishedSources.set("old-peer:audio", {
     peerId: "old-peer",
     source: "audio",
+    trackName: "old-track",
   });
   instance.qualificationState.set("old-peer", { ready: true });
   instance.providerReadiness.add("old-peer");
@@ -272,11 +286,95 @@ test("replacing a participant session retires its old media state", () => {
     reason: "Media session superseded",
   });
   assert.equal(instance.publishedSources.has("old-peer:audio"), false);
+  assert.deepEqual(recipientMessages, [
+    {
+      type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+      data: {
+        peerId: "old-peer",
+        source: "audio",
+        trackName: "old-track",
+        closed: true,
+      },
+    },
+  ]);
   assert.equal(instance.qualificationState.has("old-peer"), false);
   assert.equal(instance.providerReadiness.has("old-peer"), false);
   assert.equal(instance.transitionReadiness.has("old-peer"), false);
   assert.equal(instance.qoeMetrics.has("old-peer"), false);
   assert.equal(instance.sourceRevision, 5);
+});
+
+test("native P2P readiness uses the shared qualification protocol", async () => {
+  const instance = room();
+  const messages = [];
+  const ws = {
+    messages,
+    send(message) {
+      messages.push(JSON.parse(message));
+    },
+    serializeAttachment() {},
+  };
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+  };
+  instance.sessions.clear();
+  instance.participants.clear();
+  instance.sessions.set(ws, session);
+  instance.participants.set("user-1:device-1", {
+    ...session,
+    ws,
+    sources: new Set(),
+  });
+  instance.epoch = 2;
+  instance.route = createP2PRoute("direct", 2, 0, "qualifying-direct");
+  instance.checkQualificationComplete = () => {};
+
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY,
+    data: { epoch: 2, qualifiedPeerIds: ["peer-2"] },
+  });
+
+  assert.equal(instance.qualificationState.get("peer-1").ready, true);
+  assert.deepEqual(messages[0], {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED,
+    data: {
+      epoch: 2,
+      acknowledged: true,
+      qualifiedPeerIds: ["peer-2"],
+    },
+  });
+});
+
+test("provider failure reports the selected registry provider identity", async () => {
+  const instance = room();
+  let report = null;
+  instance.env.DSPEAK_SFU_ENABLED = "true";
+  instance.env.DSPEAK_SFU_SIGNALING_URL = "wss://media.test/socket";
+  instance.env.PROVIDER_REGISTRY_DO = {
+    idFromName: () => "global",
+    get: () => ({
+      fetch: async (request) => {
+        report = await request.json();
+        return new Response(null, { status: 200 });
+      },
+    }),
+  };
+  instance.providerConfig = { id: "provider-7" };
+  instance.beginTransition = async () => {};
+
+  await handleProviderFailure(
+    instance,
+    SFU_PROVIDER.MEDIASOUP,
+    "transport-down",
+  );
+
+  assert.deepEqual(report, {
+    providerId: "provider-7",
+    error: "transport-down",
+  });
 });
 
 test("P2P qualification sends a complete topology state", () => {

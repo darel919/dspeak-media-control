@@ -329,7 +329,10 @@ export async function handleProviderFailure(room, provider, reason) {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            providerId: "selfhost-primary",
+            providerId:
+              room.providerConfig?.id ||
+              room.env.DSPEAK_SFU_PROVIDER_ID ||
+              "selfhost-primary",
             error: reason,
           }),
         }),
