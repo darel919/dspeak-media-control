@@ -23,6 +23,7 @@ import {
   getCommonProviderCapabilities,
   getConfiguredProviderCapabilities,
   getNextProviderRecoveryAt,
+  getProviderHealth,
   getProviderRecoveryTarget,
   getQoeCandidates,
   handleCloudflareRequest,
@@ -240,7 +241,7 @@ export class MediaRoomDO {
     const activeProvider =
       this.route.kind === MEDIA_ROUTE_KIND.SFU ? this.route.provider : null;
     const activeProviderHealth = activeProvider
-      ? this.providerHealth.get(activeProvider)
+      ? getProviderHealth(this, activeProvider, this.route.providerId)
       : null;
     const retryActiveProvider = Boolean(
       activeProvider &&

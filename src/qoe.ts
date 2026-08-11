@@ -1,9 +1,13 @@
 export function normalizeQoePath(path: any) {
-  const normalizeTime = (value: unknown) => {
+  const normalizeMilliseconds = (value: unknown) => {
     if (value == null || value === "") return null;
     const number = Number(value);
-    if (!Number.isFinite(number)) return null;
-    return Math.abs(number) < 1 ? number * 1000 : number;
+    return Number.isFinite(number) ? Math.max(0, number) : null;
+  };
+  const normalizeSecondsToMilliseconds = (value: unknown) => {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, number * 1000) : null;
   };
   const normalizePercent = (value: unknown) => {
     if (value == null || value === "") return null;
@@ -16,12 +20,19 @@ export function normalizeQoePath(path: any) {
       ? normalizePercent(path?.packetLossPercent ?? path?.packetLoss)
       : Number(packetLossFraction) * 100;
   return {
-    rttMs: normalizeTime(path?.rttMs ?? path?.rtt),
-    jitterMs: normalizeTime(path?.jitterMs ?? path?.jitter),
+    rttMs:
+      path?.rttMs == null
+        ? normalizeSecondsToMilliseconds(path?.rtt)
+        : normalizeMilliseconds(path.rttMs),
+    jitterMs:
+      path?.jitterMs == null
+        ? normalizeSecondsToMilliseconds(path?.jitter)
+        : normalizeMilliseconds(path.jitterMs),
     packetLossPercent,
-    jitterBufferDelayMs: normalizeTime(
-      path?.jitterBufferDelayMs ?? path?.jitterBufferDelay,
-    ),
+    jitterBufferDelayMs:
+      path?.jitterBufferDelayMs == null
+        ? normalizeSecondsToMilliseconds(path?.jitterBufferDelay)
+        : normalizeMilliseconds(path.jitterBufferDelayMs),
     concealedAudioRatio:
       path?.concealedAudioRatio == null || path?.concealedAudioRatio === ""
         ? null

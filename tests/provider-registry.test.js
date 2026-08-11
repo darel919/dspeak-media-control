@@ -318,6 +318,38 @@ test("provider registry honors a QoE candidate for a concrete instance", async (
   assert.equal(body.provider.id, "sfu-singapore");
 });
 
+test("provider registry excludes one failed instance without removing its family", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://singapore.example",
+    healthUrl: "https://singapore.example/health",
+    priority: 1,
+    healthy: true,
+  });
+  instance.providers.set("sfu-tokyo", {
+    id: "sfu-tokyo",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://tokyo.example",
+    healthUrl: "https://tokyo.example/health",
+    priority: 20,
+    healthy: true,
+  });
+  instance.circuitBreakers.set("sfu-singapore", { state: "closed" });
+  instance.circuitBreakers.set("sfu-tokyo", { state: "closed" });
+
+  const response = await instance.handleSelect(
+    request({ excludedProviderId: "sfu-singapore" }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.provider.id, "sfu-tokyo");
+  assert.equal(body.route.provider, SFU_PROVIDER.MEDIASOUP);
+});
+
 test("provider registry ranks concrete instances by room QoE", async () => {
   const instance = registry();
   instance.stateLoaded = true;

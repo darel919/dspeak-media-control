@@ -14,6 +14,7 @@ import {
   getAvailableProviderCapabilities,
   getProviderRecoveryTarget,
   getNextProviderRecoveryAt,
+  providerHealthKey,
   scheduleProviderRecovery,
 } from "./media-room-provider.ts";
 import { isVideoMediaSource } from "./media-room-contracts.ts";
@@ -258,12 +259,17 @@ export function commitRoute(room, route) {
   room.qualificationFallbackRoute = null;
   room.qualificationParticipantSignature = null;
   if (route.kind === MEDIA_ROUTE_KIND.SFU && route.provider)
-    room.providerHealth.set(route.provider, {
-      healthy: true,
-      epoch: route.epoch,
-      unhealthyUntil: 0,
-      updatedAt: Date.now(),
-    });
+    room.providerHealth.set(
+      providerHealthKey(route.provider, route.providerId),
+      {
+        healthy: true,
+        provider: route.provider,
+        providerId: route.providerId || null,
+        epoch: route.epoch,
+        unhealthyUntil: 0,
+        updatedAt: Date.now(),
+      },
+    );
   room.qualificationState.clear();
   room.transitionReadiness.clear();
   mediaDebug(room.env, "room.route-committed", {

@@ -17,6 +17,35 @@ import { mediaDebug } from "./debug.ts";
 import { isVideoMediaSource } from "./media-room-contracts.ts";
 
 const PROVIDER_FAILURE_COOLDOWN_MS = 30_000;
+export const QOE_REPORT_MAX_AGE_MS = 30_000;
+
+export function providerHealthKey(provider, providerId = null) {
+  return providerId ? `${provider}:${providerId}` : provider;
+}
+
+export function getProviderHealth(room, provider, providerId = null) {
+  const familyHealth = room.providerHealth.get(provider);
+  if (
+    familyHealth?.healthy === false &&
+    Number(familyHealth.unhealthyUntil) > Date.now()
+  )
+    return familyHealth;
+  return (
+    room.providerHealth.get(providerHealthKey(provider, providerId)) ||
+    (providerId ? familyHealth : null)
+  );
+}
+
+function providerFromHealthKey(healthKey) {
+  if (healthKey === SFU_PROVIDER.CLOUDFLARE_REALTIME)
+    return SFU_PROVIDER.CLOUDFLARE_REALTIME;
+  if (healthKey === SFU_PROVIDER.MEDIASOUP) return SFU_PROVIDER.MEDIASOUP;
+  if (healthKey.startsWith(`${SFU_PROVIDER.CLOUDFLARE_REALTIME}:`))
+    return SFU_PROVIDER.CLOUDFLARE_REALTIME;
+  if (healthKey.startsWith(`${SFU_PROVIDER.MEDIASOUP}:`))
+    return SFU_PROVIDER.MEDIASOUP;
+  return healthKey;
+}
 
 export function getConfiguredProviderCapabilities(room) {
   return configuredSfuProviders(room.env);
@@ -44,7 +73,7 @@ export function getAvailableProviderCapabilities(room) {
   const available = getCommonProviderCapabilities(room);
   const now = Date.now();
   for (const provider of available) {
-    const health = room.providerHealth.get(provider);
+    const health = getProviderHealth(room, provider);
     if (health?.healthy === false && Number(health.unhealthyUntil) > now)
       available.delete(provider);
   }
@@ -53,8 +82,10 @@ export function getAvailableProviderCapabilities(room) {
 
 export function getNextProviderRecoveryAt(room, now = Date.now()) {
   let retryAt = null;
-  for (const provider of getCommonProviderCapabilities(room)) {
-    const health = room.providerHealth.get(provider);
+  const configured = getCommonProviderCapabilities(room);
+  for (const [healthKey, health] of room.providerHealth) {
+    const provider = providerFromHealthKey(healthKey);
+    if (!configured.has(provider)) continue;
     const unhealthyUntil = Number(health?.unhealthyUntil);
     if (
       health?.healthy === false &&
@@ -68,20 +99,22 @@ export function getNextProviderRecoveryAt(room, now = Date.now()) {
 }
 
 export function getProviderRecoveryTarget(room, now = Date.now()) {
-  const candidates = [...getCommonProviderCapabilities(room)].filter(
-    (provider) => {
-      const health = room.providerHealth.get(provider);
-      const unhealthyUntil = Number(health?.unhealthyUntil);
-      return (
-        health?.healthy === false &&
-        Number.isFinite(unhealthyUntil) &&
-        unhealthyUntil <= now
-      );
-    },
-  );
-  return candidates.includes(SFU_PROVIDER.CLOUDFLARE_REALTIME)
+  const candidates = new Set();
+  const configured = getCommonProviderCapabilities(room);
+  for (const [healthKey, health] of room.providerHealth) {
+    const provider = providerFromHealthKey(healthKey);
+    const unhealthyUntil = Number(health?.unhealthyUntil);
+    if (
+      configured.has(provider) &&
+      health?.healthy === false &&
+      Number.isFinite(unhealthyUntil) &&
+      unhealthyUntil <= now
+    )
+      candidates.add(provider);
+  }
+  return candidates.has(SFU_PROVIDER.CLOUDFLARE_REALTIME)
     ? SFU_PROVIDER.CLOUDFLARE_REALTIME
-    : candidates.includes(SFU_PROVIDER.MEDIASOUP)
+    : candidates.has(SFU_PROVIDER.MEDIASOUP)
       ? SFU_PROVIDER.MEDIASOUP
       : null;
 }
@@ -93,45 +126,73 @@ export function scheduleProviderRecovery(room, now = Date.now()) {
 
 export function getQoeCandidates(room) {
   const grouped = new Map();
-  for (const report of room.qoeMetrics.values()) {
-    const fallbackRoute =
-      room.route.kind === MEDIA_ROUTE_KIND.P2P &&
-      room.route.reason === "qualifying-direct"
-        ? room.qualificationFallbackRoute
-        : null;
-    const activeRoute =
-      room.route.kind === MEDIA_ROUTE_KIND.SFU ? room.route : fallbackRoute;
-    const provider =
-      report.provider === "sfu"
-        ? activeRoute?.provider || SFU_PROVIDER.CLOUDFLARE_REALTIME
-        : report.provider;
-    const providerId =
-      report.providerId ||
-      (activeRoute?.provider === provider ? activeRoute.providerId : null) ||
-      (room.providerConfig?.provider === provider
-        ? room.providerConfig.id
-        : null);
-    if (!["p2p", ...getConfiguredProviderCapabilities(room)].includes(provider))
-      continue;
-    const key = providerId ? `${provider}:${providerId}` : provider;
-    const candidate = grouped.get(key) || {
-      id: providerId || provider,
-      provider,
-      ...(providerId ? { providerId } : {}),
-      paths: [],
-      readyParticipants: 0,
-      requiredParticipants: room.participants.size,
-      stableSince: report.stableSince,
-    };
-    candidate.paths.push(...report.paths);
-    candidate.readyParticipants += 1;
-    candidate.stableSince = Math.min(
-      candidate.stableSince || report.stableSince,
-      report.stableSince,
-    );
-    grouped.set(key, candidate);
+  const now = Date.now();
+  for (const [peerId, storedReports] of room.qoeMetrics) {
+    const reports =
+      storedReports instanceof Map
+        ? [...storedReports.entries()]
+        : [[null, storedReports]];
+    const expiredKeys = [];
+    for (const [reportKey, report] of reports) {
+      if (!Array.isArray(report?.paths)) continue;
+      const sampledAt = Number(report.sampledAt);
+      if (
+        Number.isFinite(sampledAt) &&
+        now - sampledAt > QOE_REPORT_MAX_AGE_MS
+      ) {
+        if (reportKey !== null) expiredKeys.push(reportKey);
+        continue;
+      }
+      const fallbackRoute =
+        room.route.kind === MEDIA_ROUTE_KIND.P2P &&
+        room.route.reason === "qualifying-direct"
+          ? room.qualificationFallbackRoute
+          : null;
+      const activeRoute =
+        room.route.kind === MEDIA_ROUTE_KIND.SFU ? room.route : fallbackRoute;
+      const provider =
+        report.provider === "sfu"
+          ? activeRoute?.provider || SFU_PROVIDER.CLOUDFLARE_REALTIME
+          : report.provider;
+      const providerId =
+        report.providerId ||
+        (activeRoute?.provider === provider ? activeRoute.providerId : null) ||
+        (room.providerConfig?.provider === provider
+          ? room.providerConfig.id
+          : null);
+      if (
+        !["p2p", ...getConfiguredProviderCapabilities(room)].includes(provider)
+      )
+        continue;
+      const key = providerId ? `${provider}:${providerId}` : provider;
+      const candidate = grouped.get(key) || {
+        id: providerId || provider,
+        provider,
+        ...(providerId ? { providerId } : {}),
+        paths: [],
+        participantIds: new Set(),
+        requiredParticipants: room.participants.size,
+        stableSince: report.stableSince,
+      };
+      candidate.paths.push(...report.paths);
+      candidate.participantIds.add(peerId);
+      const stableSince = Number(report.stableSince);
+      if (Number.isFinite(stableSince))
+        candidate.stableSince = Math.min(
+          Number(candidate.stableSince) || stableSince,
+          stableSince,
+        );
+      grouped.set(key, candidate);
+    }
+    if (storedReports instanceof Map) {
+      for (const reportKey of expiredKeys) storedReports.delete(reportKey);
+      if (storedReports.size === 0) room.qoeMetrics.delete(peerId);
+    }
   }
-  return [...grouped.values()];
+  return [...grouped.values()].map(({ participantIds, ...candidate }) => ({
+    ...candidate,
+    readyParticipants: participantIds.size,
+  }));
 }
 
 export function shouldUseProviderRegistry(
@@ -276,9 +337,22 @@ export async function handleP2PFailure(room, session, reason) {
     return;
   }
   const qualificationFallback = room.qualificationFallbackRoute;
+  const qualificationFallbackHealth = qualificationFallback?.provider
+    ? getProviderHealth(
+        room,
+        qualificationFallback.provider,
+        qualificationFallback.providerId,
+      )
+    : null;
   if (
     qualificationFallback?.provider &&
-    getAvailableProviderCapabilities(room).has(qualificationFallback.provider)
+    getAvailableProviderCapabilities(room).has(
+      qualificationFallback.provider,
+    ) &&
+    !(
+      qualificationFallbackHealth?.healthy === false &&
+      Number(qualificationFallbackHealth.unhealthyUntil) > Date.now()
+    )
   ) {
     await room.restoreQualificationRoute(`p2p-failed-${reason}`);
     return;
@@ -314,9 +388,11 @@ export async function handleProviderFailure(room, provider, reason) {
       ? room.providerConfig.id
       : null);
   const epoch = room.pendingRoute?.epoch || room.route.epoch;
-  room.providerHealth.set(provider, {
+  room.providerHealth.set(providerHealthKey(provider, providerId), {
     healthy: false,
     reason,
+    provider,
+    providerId: providerId || null,
     epoch,
     unhealthyUntil: Date.now() + PROVIDER_FAILURE_COOLDOWN_MS,
     updatedAt: Date.now(),
@@ -372,9 +448,11 @@ export async function handleProviderFailure(room, provider, reason) {
       ? isSelfHostedMediasoupConfigured(room.env)
         ? SFU_PROVIDER.MEDIASOUP
         : null
-      : isCloudflareRealtimeConfigured(room.env)
-        ? SFU_PROVIDER.CLOUDFLARE_REALTIME
-        : null;
+      : providerId && isSelfHostedMediasoupConfigured(room.env)
+        ? SFU_PROVIDER.MEDIASOUP
+        : isCloudflareRealtimeConfigured(room.env)
+          ? SFU_PROVIDER.CLOUDFLARE_REALTIME
+          : null;
   if (room.pendingRoute?.provider === provider) {
     room.pendingRoute = null;
     room.pendingStartedAt = 0;
@@ -385,7 +463,11 @@ export async function handleProviderFailure(room, provider, reason) {
       room.state.storage.delete("pendingStartedAt"),
     ]);
   }
-  if (room.qualificationFallbackRoute?.provider === provider) {
+  const qualificationFallback = room.qualificationFallbackRoute;
+  if (
+    qualificationFallback?.provider === provider &&
+    (!providerId || qualificationFallback.providerId === providerId)
+  ) {
     room.qualificationFallbackRoute = null;
     await room.state.storage.delete("qualificationFallbackRoute");
   }
@@ -407,6 +489,9 @@ export async function beginTransition(
 ) {
   if (room.pendingRoute || room.transitionInFlight) return;
   room.transitionInFlight = true;
+  const selectionExcludedProvider = excludedProviderId
+    ? null
+    : excludedProvider;
   let selectedProvider = targetProvider;
   let selectedProviderConfig = null;
   let selectedProviderId = null;
@@ -414,13 +499,13 @@ export async function beginTransition(
   const shouldUseRegistry = shouldUseProviderRegistry(
     room,
     targetProvider,
-    excludedProvider,
+    selectionExcludedProvider,
   );
   const registryNamespace = room.env.PROVIDER_REGISTRY_DO;
   if (shouldUseRegistry && registryNamespace) {
     mediaDebug(room.env, "room.registry-select", {
       targetProvider,
-      excludedProvider,
+      excludedProvider: selectionExcludedProvider,
       participantCount: room.participants.size,
     });
     try {
@@ -443,7 +528,7 @@ export async function beginTransition(
               ),
             ),
             requiredSources: [],
-            excludedProvider,
+            excludedProvider: selectionExcludedProvider,
             excludedProviderId,
             qoeCandidates: getQoeCandidates(room),
           }),
@@ -472,10 +557,16 @@ export async function beginTransition(
     !isSelfHostedMediasoupConfigured(room.env)
   )
     availableProviders.delete(SFU_PROVIDER.MEDIASOUP);
+  if (
+    !registrySelectionSucceeded &&
+    selectedProvider === SFU_PROVIDER.MEDIASOUP &&
+    excludedProviderId
+  )
+    availableProviders.delete(SFU_PROVIDER.MEDIASOUP);
   selectedProvider = chooseAvailableProvider({
     requestedProvider: selectedProvider,
     availableProviders,
-    excludedProvider,
+    excludedProvider: selectionExcludedProvider,
     registrySelectionSucceeded,
     allowDirectMediasoupFallback: isSelfHostedMediasoupConfigured(room.env),
   });

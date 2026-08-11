@@ -15,6 +15,8 @@ import {
   handleCloudflareRequest,
   handleP2PFailure,
   handleProviderFailure,
+  QOE_REPORT_MAX_AGE_MS,
+  providerHealthKey,
 } from "./media-room-provider.ts";
 import { mediaDebug } from "./debug.ts";
 import { normalizeQoePath } from "./qoe.ts";
@@ -197,18 +199,35 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         typeof data.providerId === "string" && data.providerId.trim()
           ? data.providerId.trim()
           : null;
-      const previous = room.qoeMetrics.get(participant.peerId);
+      const storedReports = room.qoeMetrics.get(participant.peerId);
+      const reports = storedReports instanceof Map ? storedReports : new Map();
+      if (storedReports && !(storedReports instanceof Map))
+        reports.set(
+          `${storedReports.provider}:${storedReports.providerId || "family"}`,
+          storedReports,
+        );
+      const reportKey = `${provider}:${providerId || "family"}`;
+      const previous = reports.get(reportKey);
+      const receivedAt = Date.now();
+      const previousSampledAt = Number(previous?.sampledAt);
+      const previousIsFresh =
+        previous &&
+        (!Number.isFinite(previousSampledAt) ||
+          receivedAt - previousSampledAt <= QOE_REPORT_MAX_AGE_MS);
       const report = {
         provider,
         paths: data.paths.slice(0, 32).map((path) => normalizeQoePath(path)),
-        sampledAt: Number(data.sampledAt) || Date.now(),
+        sampledAt: Number(data.sampledAt) || receivedAt,
         stableSince:
-          previous?.provider === provider && previous?.providerId === providerId
+          previousIsFresh &&
+          previous.provider === provider &&
+          previous.providerId === providerId
             ? previous.stableSince
-            : Date.now(),
+            : receivedAt,
         ...(providerId ? { providerId } : {}),
       };
-      room.qoeMetrics.set(participant.peerId, report);
+      reports.set(reportKey, report);
+      room.qoeMetrics.set(participant.peerId, reports);
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.CLIENT_SFU_RTT:
@@ -224,7 +243,8 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       if (
         room.pendingRoute &&
         Number(data.epoch) === room.pendingRoute.epoch &&
-        Number(data.sourceRevision) === room.pendingRoute.sourceRevision
+        Number(data.sourceRevision) === room.pendingRoute.sourceRevision &&
+        matchesProviderIdentity(room.pendingRoute, data)
       )
         await handleProviderFailure(
           room,
@@ -243,18 +263,19 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       const failedPending =
         room.pendingRoute &&
         Number(data.epoch) === room.pendingRoute.epoch &&
-        sourceRevision === room.pendingRoute.sourceRevision;
+        sourceRevision === room.pendingRoute.sourceRevision &&
+        matchesProviderIdentity(room.pendingRoute, data);
       const failedActive =
         room.route.kind === "sfu" &&
-        room.route.provider === data.provider &&
         Number(data.epoch) === room.route.epoch &&
-        sourceRevision === room.sourceRevision;
+        sourceRevision === room.sourceRevision &&
+        matchesProviderIdentity(room.route, data);
       const failedQualificationFallback =
         room.route.kind === "p2p" &&
         room.route.reason === "qualifying-direct" &&
-        room.qualificationFallbackRoute?.provider === data.provider &&
         Number(data.epoch) === room.route.epoch &&
-        sourceRevision === room.sourceRevision;
+        sourceRevision === room.sourceRevision &&
+        matchesProviderIdentity(room.qualificationFallbackRoute, data);
       if (failedPending || failedActive || failedQualificationFallback) {
         room.providerReadiness.clear();
         room.transitionReadiness.clear();
@@ -398,19 +419,24 @@ async function handleProviderReady(room, ws, session, data) {
     !room.pendingRoute ||
     Number(data.epoch) !== room.pendingRoute.epoch ||
     Number(data.sourceRevision) !== room.pendingRoute.sourceRevision ||
-    data.provider !== room.pendingRoute.provider
+    !matchesProviderIdentity(room.pendingRoute, data)
   )
     return;
   room.providerReadiness.add(session.peerId);
   session.providerReadyEpoch = Number(data.epoch);
   session.providerReadySourceRevision = Number(data.sourceRevision);
   ws.serializeAttachment(session);
-  room.providerHealth.set(data.provider, {
-    healthy: true,
-    epoch: Number(data.epoch),
-    unhealthyUntil: 0,
-    updatedAt: Date.now(),
-  });
+  room.providerHealth.set(
+    providerHealthKey(data.provider, data.providerId || null),
+    {
+      healthy: true,
+      provider: data.provider,
+      providerId: data.providerId || null,
+      epoch: Number(data.epoch),
+      unhealthyUntil: 0,
+      updatedAt: Date.now(),
+    },
+  );
   await room.state.storage.put(
     "providerHealth",
     Object.fromEntries(room.providerHealth),
@@ -424,11 +450,18 @@ async function handleTopologyReady(room, session, data) {
     room.pendingRoute.kind !== "sfu" ||
     data.target !== "sfu" ||
     Number(data.epoch) !== room.pendingRoute.epoch ||
-    Number(data.sourceRevision) !== room.pendingRoute.sourceRevision
+    Number(data.sourceRevision) !== room.pendingRoute.sourceRevision ||
+    !matchesProviderIdentity(room.pendingRoute, data)
   )
     return;
   room.transitionReadiness.add(session.peerId);
   await room.maybeCommitPendingRoute();
+}
+
+function matchesProviderIdentity(route, data) {
+  if (!route || data?.provider !== route.provider) return false;
+  if (route.providerId) return data.providerId === route.providerId;
+  return !data.providerId || data.providerId === null;
 }
 
 async function handleCloudflarePublication(room, ws, session, data) {

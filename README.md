@@ -154,10 +154,20 @@ Realtime does not use a provider ticket; its credentials remain Worker
 secrets.
 
 `media-qoe` reports accept an optional concrete `providerId` alongside the
-provider family and path metrics. The room keeps instances separate and sends
+provider family and path metrics. A participant may report several provider
+instances at once; measurements older than 30 seconds are excluded from route
+placement. The wire fields `rttMs`, `jitterMs`, and `jitterBufferDelayMs` are
+always milliseconds, while `packetLossPercent` is always a percentage. The
+legacy aliases `rtt`, `jitter`, and `jitterBufferDelay` are interpreted as
+seconds for compatibility. The room keeps instances separate and sends
 complete candidates to the registry. Selection uses a conservative worst-path
 QoE score that accounts for RTT, jitter, jitter-buffer delay, and packet loss;
 family-only reports remain supported for older clients.
+
+For a route with a concrete `providerId`, `provider-ready`, `topology-ready`,
+`provider-failure`, and `topology-failed` messages must echo the selected
+provider family, instance ID, epoch, and source revision. Mismatched route
+identities are ignored as stale messages.
 
 ## Tests
 

@@ -6,11 +6,28 @@ describe("media-control QoE ranking", () => {
   it("normalizes WebRTC time and loss units", () => {
     const candidate = scoreQoeCandidate({
       provider: "cloudflare-realtime",
-      paths: [{ rttMs: 0.08, jitterMs: 0.004, fractionLost: 0.01 }],
+      paths: [{ rttMs: 80, jitterMs: 4, fractionLost: 0.01 }],
     });
     assert.equal(candidate.paths[0].rttMs, 80);
     assert.equal(candidate.paths[0].jitterMs, 4);
     assert.equal(candidate.paths[0].packetLossPercent, 1);
+  });
+
+  it("converts only legacy second aliases and preserves explicit milliseconds", () => {
+    const candidate = scoreQoeCandidate({
+      provider: "cloudflare-realtime",
+      paths: [
+        { rtt: 0.08, jitter: 0.004, jitterBufferDelay: 0.01 },
+        { rttMs: 0.5, jitterMs: 0.25, jitterBufferDelayMs: 0.75 },
+      ],
+    });
+
+    assert.equal(candidate.paths[0].rttMs, 80);
+    assert.equal(candidate.paths[0].jitterMs, 4);
+    assert.equal(candidate.paths[0].jitterBufferDelayMs, 10);
+    assert.equal(candidate.paths[1].rttMs, 0.5);
+    assert.equal(candidate.paths[1].jitterMs, 0.25);
+    assert.equal(candidate.paths[1].jitterBufferDelayMs, 0.75);
   });
 
   it("keeps absent metrics absent instead of converting null to zero", () => {
