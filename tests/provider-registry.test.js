@@ -318,6 +318,55 @@ test("provider registry honors a QoE candidate for a concrete instance", async (
   assert.equal(body.provider.id, "sfu-singapore");
 });
 
+test("provider registry ranks concrete instances by room QoE", async () => {
+  const instance = registry();
+  instance.stateLoaded = true;
+  instance.providers.set("sfu-singapore", {
+    id: "sfu-singapore",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://singapore.example",
+    healthUrl: "https://singapore.example/health",
+    priority: 1,
+    healthy: true,
+  });
+  instance.providers.set("sfu-tokyo", {
+    id: "sfu-tokyo",
+    provider: SFU_PROVIDER.MEDIASOUP,
+    signalingUrl: "wss://tokyo.example",
+    healthUrl: "https://tokyo.example/health",
+    priority: 20,
+    healthy: true,
+  });
+  instance.circuitBreakers.set("sfu-singapore", { state: "closed" });
+  instance.circuitBreakers.set("sfu-tokyo", { state: "closed" });
+
+  const response = await instance.handleSelect(
+    request({
+      qoeCandidates: [
+        {
+          provider: SFU_PROVIDER.MEDIASOUP,
+          providerId: "sfu-singapore",
+          readyParticipants: 2,
+          requiredParticipants: 2,
+          paths: [{ rttMs: 31, jitterMs: 18, fractionLost: 0.032 }],
+        },
+        {
+          provider: SFU_PROVIDER.MEDIASOUP,
+          providerId: "sfu-tokyo",
+          readyParticipants: 2,
+          requiredParticipants: 2,
+          paths: [{ rttMs: 42, jitterMs: 3, fractionLost: 0.001 }],
+        },
+      ],
+    }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.provider.id, "sfu-tokyo");
+  assert.equal(body.route.providerId, "sfu-tokyo");
+});
+
 test("provider registry closes a breaker after consecutive healthy probes", async () => {
   const instance = registry();
   instance.stateLoaded = true;

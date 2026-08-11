@@ -438,6 +438,11 @@ export class MediaRoomDO {
       this.route.reason === "qualifying-direct"
         ? this.qualificationFallbackRoute?.provider
         : undefined;
+    const qualificationFallbackProviderId =
+      this.route.kind === MEDIA_ROUTE_KIND.P2P &&
+      this.route.reason === "qualifying-direct"
+        ? this.qualificationFallbackRoute?.providerId
+        : undefined;
     const mode = pending
       ? "switching"
       : this.route.kind === MEDIA_ROUTE_KIND.LOCAL
@@ -456,9 +461,14 @@ export class MediaRoomDO {
         pending?.provider ||
         this.route.provider ||
         qualificationFallbackProvider,
+      providerId:
+        pending?.providerId ||
+        this.route.providerId ||
+        qualificationFallbackProviderId,
       reason: pending?.reason || this.route.reason,
       target: pending ? "sfu" : undefined,
       targetProvider: pending?.provider,
+      targetProviderId: pending?.providerId,
       targetRoute: pending || undefined,
       sourceRevision: this.sourceRevision,
       participants: this.getParticipantList(),

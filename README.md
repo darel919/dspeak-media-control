@@ -153,6 +153,12 @@ instance after health, circuit, region, and priority checks. Cloudflare
 Realtime does not use a provider ticket; its credentials remain Worker
 secrets.
 
+`media-qoe` reports accept an optional concrete `providerId` alongside the
+provider family and path metrics. The room keeps instances separate and sends
+complete candidates to the registry. Selection uses a conservative worst-path
+QoE score that accounts for RTT, jitter, jitter-buffer delay, and packet loss;
+family-only reports remain supported for older clients.
+
 ## Tests
 
 ```bash

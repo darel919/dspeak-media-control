@@ -27,9 +27,11 @@ describe("dspeak-media-control protocol", () => {
       3,
       4,
       "fallback",
+      "cloudflare-primary",
     );
     assert.strictEqual(route.kind, "sfu");
     assert.strictEqual(route.provider, "cloudflare-realtime");
+    assert.strictEqual(route.providerId, "cloudflare-primary");
     assert.strictEqual(route.epoch, 3);
   });
 

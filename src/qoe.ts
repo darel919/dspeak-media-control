@@ -30,7 +30,34 @@ export function normalizeQoePath(path: any) {
           : null,
     candidateType: path?.candidateType || null,
     protocol: path?.protocol || null,
+    availableBitrateBps:
+      path?.availableBitrateBps == null || path?.availableBitrateBps === ""
+        ? null
+        : Number.isFinite(Number(path.availableBitrateBps))
+          ? Math.max(0, Number(path.availableBitrateBps))
+          : null,
   };
+}
+
+function scorePath(path: any) {
+  if (path.rttMs == null) return Number.POSITIVE_INFINITY;
+  return (
+    path.rttMs / 2 +
+    (path.jitterMs || 0) * 2 +
+    (path.jitterBufferDelayMs || 0) +
+    20 +
+    (path.packetLossPercent || 0) * 100
+  );
+}
+
+function percentile(values: number[], fraction: number) {
+  if (!values.length) return Number.POSITIVE_INFINITY;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * fraction) - 1),
+  );
+  return sorted[index];
 }
 
 export function scoreQoeCandidate(candidate: any) {
@@ -45,6 +72,11 @@ export function scoreQoeCandidate(candidate: any) {
     );
   });
   const finite = (values: number[]) => values.filter(Number.isFinite);
+  const qualityScores = paths.map(scorePath);
+  const finiteQualityScores = finite(qualityScores);
+  const worstQoeScore = qualityScores.length
+    ? Math.max(...qualityScores)
+    : Number.POSITIVE_INFINITY;
   return {
     ...candidate,
     paths,
@@ -64,6 +96,8 @@ export function scoreQoeCandidate(candidate: any) {
       0,
       ...finite(paths.map((path) => path.jitterMs ?? 0)),
     ),
+    p95QoeScore: percentile(finiteQualityScores, 0.95),
+    qoeScore: worstQoeScore,
   };
 }
 
@@ -71,14 +105,16 @@ export function rankQoeCandidates(candidates: any[]) {
   return candidates.map(scoreQoeCandidate).sort((left, right) => {
     const leftTuple = [
       left.viable ? 0 : 1,
-      left.worstLatencyMs,
+      left.qoeScore,
+      left.p95QoeScore,
       left.worstLossPercent,
       left.worstJitterMs,
       Number(left.infrastructureCost) || Number.POSITIVE_INFINITY,
     ];
     const rightTuple = [
       right.viable ? 0 : 1,
-      right.worstLatencyMs,
+      right.qoeScore,
+      right.p95QoeScore,
       right.worstLossPercent,
       right.worstJitterMs,
       Number(right.infrastructureCost) || Number.POSITIVE_INFINITY,
@@ -106,5 +142,7 @@ export function qoeWouldImprove(active: any, candidate: any, now = Date.now()) {
     return false;
   if (!Number.isFinite(Number(candidate.stableSince))) return false;
   if (now - Number(candidate.stableSince) < 10_000) return false;
-  return Number(active.worstLatencyMs) - Number(candidate.worstLatencyMs) >= 20;
+  const activeScore = Number(active.qoeScore ?? active.worstLatencyMs);
+  const candidateScore = Number(candidate.qoeScore ?? candidate.worstLatencyMs);
+  return activeScore - candidateScore >= 20;
 }

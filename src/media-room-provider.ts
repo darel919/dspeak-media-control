@@ -94,20 +94,30 @@ export function scheduleProviderRecovery(room, now = Date.now()) {
 export function getQoeCandidates(room) {
   const grouped = new Map();
   for (const report of room.qoeMetrics.values()) {
+    const fallbackRoute =
+      room.route.kind === MEDIA_ROUTE_KIND.P2P &&
+      room.route.reason === "qualifying-direct"
+        ? room.qualificationFallbackRoute
+        : null;
+    const activeRoute =
+      room.route.kind === MEDIA_ROUTE_KIND.SFU ? room.route : fallbackRoute;
     const provider =
       report.provider === "sfu"
-        ? room.route.provider ||
-          (room.route.kind === MEDIA_ROUTE_KIND.P2P &&
-          room.route.reason === "qualifying-direct"
-            ? room.qualificationFallbackRoute?.provider
-            : null) ||
-          SFU_PROVIDER.CLOUDFLARE_REALTIME
+        ? activeRoute?.provider || SFU_PROVIDER.CLOUDFLARE_REALTIME
         : report.provider;
+    const providerId =
+      report.providerId ||
+      (activeRoute?.provider === provider ? activeRoute.providerId : null) ||
+      (room.providerConfig?.provider === provider
+        ? room.providerConfig.id
+        : null);
     if (!["p2p", ...getConfiguredProviderCapabilities(room)].includes(provider))
       continue;
-    const candidate = grouped.get(provider) || {
-      id: provider,
+    const key = providerId ? `${provider}:${providerId}` : provider;
+    const candidate = grouped.get(key) || {
+      id: providerId || provider,
       provider,
+      ...(providerId ? { providerId } : {}),
       paths: [],
       readyParticipants: 0,
       requiredParticipants: room.participants.size,
@@ -119,7 +129,7 @@ export function getQoeCandidates(room) {
       candidate.stableSince || report.stableSince,
       report.stableSince,
     );
-    grouped.set(provider, candidate);
+    grouped.set(key, candidate);
   }
   return [...grouped.values()];
 }
@@ -295,6 +305,14 @@ export async function handleP2PFailure(room, session, reason) {
 
 export async function handleProviderFailure(room, provider, reason) {
   if (!provider) return;
+  const providerId =
+    (room.pendingRoute?.provider === provider
+      ? room.pendingRoute.providerId
+      : null) ||
+    (room.route?.provider === provider ? room.route.providerId : null) ||
+    (room.providerConfig?.provider === provider
+      ? room.providerConfig.id
+      : null);
   const epoch = room.pendingRoute?.epoch || room.route.epoch;
   room.providerHealth.set(provider, {
     healthy: false,
@@ -311,7 +329,13 @@ export async function handleProviderFailure(room, provider, reason) {
     room.sendMessage(
       participant.ws,
       MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_FAILURE,
-      { provider, epoch, sourceRevision: room.sourceRevision, reason },
+      {
+        provider,
+        providerId: providerId || undefined,
+        epoch,
+        sourceRevision: room.sourceRevision,
+        reason,
+      },
     );
   if (
     provider === SFU_PROVIDER.MEDIASOUP &&
@@ -330,6 +354,7 @@ export async function handleProviderFailure(room, provider, reason) {
           },
           body: JSON.stringify({
             providerId:
+              providerId ||
               room.providerConfig?.id ||
               room.env.DSPEAK_SFU_PROVIDER_ID ||
               "selfhost-primary",
@@ -364,7 +389,13 @@ export async function handleProviderFailure(room, provider, reason) {
     room.qualificationFallbackRoute = null;
     await room.state.storage.delete("qualificationFallbackRoute");
   }
-  await beginTransition(room, alternate, `provider-failed-${reason}`, provider);
+  await beginTransition(
+    room,
+    alternate,
+    `provider-failed-${reason}`,
+    provider,
+    providerId,
+  );
 }
 
 export async function beginTransition(
@@ -372,11 +403,13 @@ export async function beginTransition(
   targetProvider,
   reason = "provider-transition",
   excludedProvider = null,
+  excludedProviderId = null,
 ) {
   if (room.pendingRoute || room.transitionInFlight) return;
   room.transitionInFlight = true;
   let selectedProvider = targetProvider;
   let selectedProviderConfig = null;
+  let selectedProviderId = null;
   let registrySelectionSucceeded = false;
   const shouldUseRegistry = shouldUseProviderRegistry(
     room,
@@ -411,6 +444,7 @@ export async function beginTransition(
             ),
             requiredSources: [],
             excludedProvider,
+            excludedProviderId,
             qoeCandidates: getQoeCandidates(room),
           }),
         }),
@@ -419,6 +453,8 @@ export async function beginTransition(
         const selection = await response.json();
         selectedProvider = selection.route?.provider || selectedProvider;
         selectedProviderConfig = selection.provider || null;
+        selectedProviderId =
+          selection.route?.providerId || selectedProviderConfig?.id || null;
         registrySelectionSucceeded = true;
       }
     } catch (error) {
@@ -470,12 +506,18 @@ export async function beginTransition(
     mediaDebug(room.env, "room.provider-unavailable", { reason });
     return;
   }
+  selectedProviderId ||=
+    selectedProviderConfig?.id ||
+    (selectedProvider === SFU_PROVIDER.MEDIASOUP
+      ? room.env.DSPEAK_SFU_PROVIDER_ID || null
+      : null);
   room.providerConfig = selectedProviderConfig;
   const targetRoute = createSFURoute(
     selectedProvider,
     room.epoch + 1,
     room.sourceRevision,
     reason,
+    selectedProviderId,
   );
   room.pendingRoute = targetRoute;
   room.pendingStartedAt = Date.now();
@@ -492,6 +534,7 @@ export async function beginTransition(
   };
   mediaDebug(room.env, "room.transition-start", {
     provider: selectedProvider,
+    providerId: selectedProviderId,
     epoch: targetRoute.epoch,
     reason,
     registrySelectionSucceeded,
@@ -533,6 +576,7 @@ export async function issueProviderTicket(room, participant, route) {
     {
       route,
       provider: route.provider,
+      providerId: route.providerId || room.providerConfig?.id || null,
       epoch: route.epoch,
       signalingUrl:
         room.providerConfig?.signalingUrl || room.env.DSPEAK_SFU_SIGNALING_URL,
@@ -557,6 +601,7 @@ export async function createProviderTicket(
     roomId: participant.channelId,
     routeEpoch: route.epoch,
     providerId:
+      route.providerId ||
       providerConfig?.id ||
       room.env.DSPEAK_SFU_PROVIDER_ID ||
       "selfhost-primary",

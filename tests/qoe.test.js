@@ -43,4 +43,25 @@ describe("media-control QoE ranking", () => {
       ["cloudflare-realtime", "mediasoup"],
     );
   });
+
+  it("ranks stable media quality above lower latency with loss and jitter", () => {
+    const ranked = rankQoeCandidates([
+      {
+        provider: "mediasoup",
+        providerId: "sfu-singapore",
+        paths: [{ rttMs: 31, jitterMs: 18, fractionLost: 0.032 }],
+      },
+      {
+        provider: "mediasoup",
+        providerId: "sfu-tokyo",
+        paths: [{ rttMs: 42, jitterMs: 3, fractionLost: 0.001 }],
+      },
+    ]);
+
+    assert.deepEqual(
+      ranked.map((candidate) => candidate.providerId),
+      ["sfu-tokyo", "sfu-singapore"],
+    );
+    assert.ok(ranked[0].qoeScore < ranked[1].qoeScore);
+  });
 });

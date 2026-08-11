@@ -183,7 +183,9 @@ export class ProviderRegistryDO {
             Number.isFinite(Number(path.rttMs)),
           ) &&
           candidates.some(
-            (provider) => getProviderFamily(provider) === candidate.provider,
+            (provider) =>
+              getProviderFamily(provider) === candidate.provider &&
+              (!candidate.providerId || provider.id === candidate.providerId),
           ),
       ),
     );
@@ -198,7 +200,11 @@ export class ProviderRegistryDO {
       if (provider)
         return new Response(
           JSON.stringify({
-            route: { kind: MEDIA_ROUTE_KIND.SFU, provider: qoeProvider },
+            route: {
+              kind: MEDIA_ROUTE_KIND.SFU,
+              provider: qoeProvider,
+              providerId: provider.id,
+            },
             provider,
           }),
         );
@@ -216,6 +222,7 @@ export class ProviderRegistryDO {
           route: {
             kind: MEDIA_ROUTE_KIND.SFU,
             provider: SFU_PROVIDER.CLOUDFLARE_REALTIME,
+            providerId: cfProvider.id,
           },
           provider: cfProvider,
         }),
@@ -234,6 +241,7 @@ export class ProviderRegistryDO {
           route: {
             kind: MEDIA_ROUTE_KIND.SFU,
             provider: SFU_PROVIDER.MEDIASOUP,
+            providerId: msProvider.id,
           },
           provider: msProvider,
         }),
@@ -405,6 +413,7 @@ function selectProviderInstance(
   const qoeCandidates = qoeProviderId
     ? familyCandidates.filter((candidate) => candidate.id === qoeProviderId)
     : familyCandidates;
+  if (qoeProviderId && !qoeCandidates.length) return null;
   const ranked = (qoeCandidates.length ? qoeCandidates : familyCandidates).sort(
     (left, right) => {
       const leftRegion = preferredRegion && left.region === preferredRegion;

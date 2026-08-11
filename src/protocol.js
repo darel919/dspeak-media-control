@@ -117,14 +117,22 @@ export function createP2PRoute(path, epoch, sourceRevision, reason) {
   };
 }
 
-export function createSFURoute(provider, epoch, sourceRevision, reason) {
-  return {
+export function createSFURoute(
+  provider,
+  epoch,
+  sourceRevision,
+  reason,
+  providerId = null,
+) {
+  const route = {
     kind: MEDIA_ROUTE_KIND.SFU,
     provider,
     epoch,
     sourceRevision,
     reason,
   };
+  if (providerId) route.providerId = providerId;
+  return route;
 }
 
 export function validateRouteForMode(route, mode) {

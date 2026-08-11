@@ -45,6 +45,10 @@ See `.env.example` for the full variable list and `wrangler.toml` for bindings.
 ## WebSocket/media protocol
 
 See `src/protocol.js` for message types and route model. Protocol version is `919`.
+Selected provider instance IDs are preserved in route state, topology messages,
+provider tickets, and `media-qoe` aggregation. QoE selection uses worst-path
+media quality rather than RTT alone, while family-only reports remain supported
+for older clients.
 
 ## Development
 

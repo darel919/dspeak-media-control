@@ -193,14 +193,22 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       );
       if (!participant || !Array.isArray(data.paths)) break;
       const provider = String(data.provider || "");
+      const providerId =
+        typeof data.providerId === "string" && data.providerId.trim()
+          ? data.providerId.trim()
+          : null;
       const previous = room.qoeMetrics.get(participant.peerId);
-      room.qoeMetrics.set(participant.peerId, {
+      const report = {
         provider,
         paths: data.paths.slice(0, 32).map((path) => normalizeQoePath(path)),
         sampledAt: Number(data.sampledAt) || Date.now(),
         stableSince:
-          previous?.provider === provider ? previous.stableSince : Date.now(),
-      });
+          previous?.provider === provider && previous?.providerId === providerId
+            ? previous.stableSince
+            : Date.now(),
+        ...(providerId ? { providerId } : {}),
+      };
+      room.qoeMetrics.set(participant.peerId, report);
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.CLIENT_SFU_RTT:

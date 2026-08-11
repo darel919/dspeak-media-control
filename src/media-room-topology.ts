@@ -305,6 +305,7 @@ export function commitRoute(room, route) {
               ? "sfu"
               : "idle",
         provider: route.provider,
+        providerId: route.providerId,
         epoch: route.epoch,
         sourceRevision: route.sourceRevision,
         participants: room.getParticipantList(),
@@ -330,6 +331,7 @@ export function restoreQualificationRoute(
       room.epoch + 1,
       room.sourceRevision,
       reason,
+      fallback.providerId || null,
     ),
   );
 }
