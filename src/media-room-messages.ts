@@ -1,4 +1,5 @@
 import {
+  MEDIA_CONTROL_CONTRACT_REVISION,
   MEDIA_CONTROL_CLIENT_HELLO,
   MEDIA_CONTROL_MESSAGE_TYPES,
   MEDIA_CONTROL_PROTOCOL_VERSION,
@@ -210,14 +211,19 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       const previous = reports.get(reportKey);
       const receivedAt = Date.now();
       const previousSampledAt = Number(previous?.sampledAt);
+      const previousReceivedAt = Number(previous?.receivedAt);
+      const previousFreshnessAt = Number.isFinite(previousReceivedAt)
+        ? previousReceivedAt
+        : previousSampledAt;
       const previousIsFresh =
         previous &&
-        (!Number.isFinite(previousSampledAt) ||
-          receivedAt - previousSampledAt <= QOE_REPORT_MAX_AGE_MS);
+        (!Number.isFinite(previousFreshnessAt) ||
+          receivedAt - previousFreshnessAt <= QOE_REPORT_MAX_AGE_MS);
       const report = {
         provider,
         paths: data.paths.slice(0, 32).map((path) => normalizeQoePath(path)),
         sampledAt: Number(data.sampledAt) || receivedAt,
+        receivedAt,
         stableSince:
           previousIsFresh &&
           previous.provider === provider &&
@@ -341,7 +347,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   }
   if (
     Number(data.protocolVersion) !== MEDIA_CONTROL_PROTOCOL_VERSION ||
-    Number(data.contractRevision) !== 2 ||
+    Number(data.contractRevision) !== MEDIA_CONTROL_CONTRACT_REVISION ||
     data.mediaSessionId !== session.mediaSessionId
   ) {
     room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {

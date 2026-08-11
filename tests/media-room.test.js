@@ -958,6 +958,7 @@ test("room QoE aggregation ignores expired instance reports", () => {
   const instance = room();
   instance.env.DSPEAK_SFU_ENABLED = "true";
   instance.env.DSPEAK_SFU_SIGNALING_URL = "wss://sfu.test/socket";
+  const now = Date.now();
   instance.qoeMetrics.set(
     "peer-1",
     new Map([
@@ -967,8 +968,9 @@ test("room QoE aggregation ignores expired instance reports", () => {
           provider: SFU_PROVIDER.MEDIASOUP,
           providerId: "sfu-singapore",
           paths: [{ rttMs: 31 }],
-          sampledAt: Date.now() - QOE_REPORT_MAX_AGE_MS - 1,
-          stableSince: Date.now() - 60_000,
+          sampledAt: now + 120_000,
+          receivedAt: now - QOE_REPORT_MAX_AGE_MS - 1,
+          stableSince: now - 60_000,
         },
       ],
       [
@@ -977,8 +979,9 @@ test("room QoE aggregation ignores expired instance reports", () => {
           provider: SFU_PROVIDER.MEDIASOUP,
           providerId: "sfu-tokyo",
           paths: [{ rttMs: 42 }],
-          sampledAt: Date.now(),
-          stableSince: Date.now() - 20_000,
+          sampledAt: now,
+          receivedAt: now,
+          stableSince: now - 20_000,
         },
       ],
     ]),

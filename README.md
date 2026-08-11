@@ -144,7 +144,9 @@ Client connects to `WS /media-control/:channelId` and must send a valid media
 ticket first (see `src/protocol.js` for message constants / route model).
 
 Protocol version: **919** — hello handshake family (`hello919`, `hi919`), same
-as the media signaling protocol in the main app.
+as the media signaling protocol in the main app. Contract revision: **3**;
+SFU readiness and failure acknowledgements echo the selected provider instance
+when one is assigned.
 
 The mediasoup fallback is available only when a healthy `dspeak-sfu` instance
 is registered at `/registry/register`. Registration accepts `provider`,

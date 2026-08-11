@@ -135,10 +135,12 @@ export function getQoeCandidates(room) {
     const expiredKeys = [];
     for (const [reportKey, report] of reports) {
       if (!Array.isArray(report?.paths)) continue;
+      const receivedAt = Number(report.receivedAt);
       const sampledAt = Number(report.sampledAt);
+      const freshnessAt = Number.isFinite(receivedAt) ? receivedAt : sampledAt;
       if (
-        Number.isFinite(sampledAt) &&
-        now - sampledAt > QOE_REPORT_MAX_AGE_MS
+        Number.isFinite(freshnessAt) &&
+        now - freshnessAt > QOE_REPORT_MAX_AGE_MS
       ) {
         if (reportKey !== null) expiredKeys.push(reportKey);
         continue;

@@ -147,7 +147,7 @@ test("rejects a valid ticket for a different channel during room authentication"
     data: {
       ticket: await mediaToken({ channelId: "other-channel" }),
       protocolVersion: 919,
-      contractRevision: 2,
+      contractRevision: 3,
       mediaSessionId: "media-session-1",
     },
   });

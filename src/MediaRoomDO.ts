@@ -1,6 +1,7 @@
 import {
   CONTROL_HEARTBEAT_INTERVAL_MS,
   CONTROL_HEARTBEAT_TIMEOUT_MS,
+  MEDIA_CONTROL_CONTRACT_REVISION,
   MEDIA_CONTROL_CLIENT_HELLO,
   MEDIA_CONTROL_MESSAGE_TYPES,
   MEDIA_CONTROL_PROTOCOL_VERSION,
@@ -161,7 +162,7 @@ export class MediaRoomDO {
         type: MEDIA_CONTROL_SERVER_HELLO,
         data: {
           protocolVersion: MEDIA_CONTROL_PROTOCOL_VERSION,
-          contractRevision: 2,
+          contractRevision: MEDIA_CONTROL_CONTRACT_REVISION,
           mediaSessionId: session.mediaSessionId,
           heartbeatIntervalMs: CONTROL_HEARTBEAT_INTERVAL_MS,
           heartbeatTimeoutMs: CONTROL_HEARTBEAT_TIMEOUT_MS,
