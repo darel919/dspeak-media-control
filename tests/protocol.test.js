@@ -64,6 +64,36 @@ describe("dspeak-media-control protocol", () => {
     assert.ok(!validateRouteForMode(sfuRoute, "direct").valid);
   });
 
+  it("separates channel capacity from P2P qualification limits", async () => {
+    const {
+      MAX_MEDIA_CHANNEL_PARTICIPANTS,
+      P2P_PARTICIPANT_LIMITS,
+      checkP2PEligibility,
+      getMediaChannelParticipantLimit,
+      getP2PQualificationLimit,
+    } = await import("../src/protocol.js");
+
+    assert.equal(MAX_MEDIA_CHANNEL_PARTICIPANTS, 100);
+    assert.equal(P2P_PARTICIPANT_LIMITS.directAudio, 8);
+    assert.equal(P2P_PARTICIPANT_LIMITS.directVideo, 4);
+    assert.equal(P2P_PARTICIPANT_LIMITS.autoAudio, 8);
+    assert.equal(P2P_PARTICIPANT_LIMITS.autoVideo, 4);
+    assert.equal(getMediaChannelParticipantLimit("direct", false), 8);
+    assert.equal(getMediaChannelParticipantLimit("direct", true), 4);
+    assert.equal(getMediaChannelParticipantLimit("auto", false), 100);
+    assert.equal(getMediaChannelParticipantLimit("auto", true), 100);
+    assert.equal(getP2PQualificationLimit("auto", false), 8);
+    assert.equal(getP2PQualificationLimit("auto", true), 4);
+    assert.equal(
+      checkP2PEligibility({
+        connectionMode: "auto",
+        participantCount: 100,
+        hasVideo: false,
+      }).eligible,
+      false,
+    );
+  });
+
   it("compares route epochs", async () => {
     const { compareRouteEpoch, createP2PRoute, P2P_PATH } =
       await import("../src/protocol.js");

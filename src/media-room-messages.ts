@@ -4,6 +4,7 @@ import {
   MEDIA_CONTROL_MESSAGE_TYPES,
   MEDIA_CONTROL_PROTOCOL_VERSION,
   SFU_PROVIDER,
+  getMediaChannelParticipantLimit,
 } from "./protocol.js";
 import { verifyMediaTicket } from "./tickets.js";
 import {
@@ -11,6 +12,7 @@ import {
   normalizeMediaOwnerSource,
   normalizeParticipantVoiceState,
   normalizeMediaSources,
+  isVideoMediaSource,
 } from "./media-room-contracts.ts";
 import {
   handleCloudflareRequest,
@@ -130,6 +132,22 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
           code: "INVALID_MEDIA_SOURCES",
           error: "Media source identifiers are invalid",
+        });
+        break;
+      }
+      const hasVideo = [...room.participants.values()].some((candidate) =>
+        [
+          ...(candidate === participant ? sources : candidate.sources || []),
+        ].some((source) => isVideoMediaSource(source)),
+      );
+      const participantLimit = getMediaChannelParticipantLimit(
+        session.connectionMode,
+        hasVideo,
+      );
+      if (room.participants.size > participantLimit) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+          error: `This media channel supports up to ${participantLimit} participants for the active media mode`,
         });
         break;
       }
@@ -403,6 +421,26 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   session.routeEpoch = claims.routeEpoch || 0;
   const participantKey = `${claims.sub}:${claims.deviceId}`;
   const resumedParticipant = room.participants.get(participantKey);
+  const hasVideo = [...room.participants.values()].some((participant) =>
+    [...(participant.sources || [])].some((source) =>
+      isVideoMediaSource(source),
+    ),
+  );
+  const participantLimit = getMediaChannelParticipantLimit(
+    session.connectionMode,
+    hasVideo,
+  );
+  const projectedParticipantCount = resumedParticipant
+    ? room.participants.size
+    : room.participants.size + 1;
+  if (projectedParticipantCount > participantLimit) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      code: "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+      error: `This media channel supports up to ${participantLimit} participants for the active media mode`,
+    });
+    ws.close(4004, "Media channel participant limit exceeded");
+    return;
+  }
   session.muted = resumedParticipant?.muted !== false;
   session.deafened = resumedParticipant?.deafened === true;
   const configured = room.getConfiguredProviderCapabilities();

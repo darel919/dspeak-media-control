@@ -31,6 +31,63 @@ function env(publicKey = publicPem, providerKey = privatePem) {
   };
 }
 
+function capacityRoom() {
+  const storage = {
+    get: async () => null,
+    put: async () => {},
+    delete: async () => {},
+    setAlarm: async () => {},
+  };
+  const room = new MediaRoomDO({ storage, getWebSockets: () => [] }, env());
+  room.stateLoaded = true;
+  room.channelId = "channel-1";
+  room.commitRoute = () => {};
+  room.sendTopology = () => {};
+  room.broadcastTopology = () => {};
+  room.maybeStartQualification = () => {};
+  room.refreshPendingRouteSourceRevision = async () => {};
+  return room;
+}
+
+function capacitySocket() {
+  return {
+    messages: [],
+    closeCode: null,
+    send(message) {
+      this.messages.push(JSON.parse(message));
+    },
+    close(code, reason) {
+      this.closeCode = { code, reason };
+    },
+    serializeAttachment() {},
+  };
+}
+
+async function authenticateParticipant(room, index, connectionMode) {
+  const ws = capacitySocket();
+  const mediaSessionId = `media-session-${index}`;
+  const session = {
+    authenticated: false,
+    mediaSessionId,
+    peerId: `peer-${index}`,
+  };
+  room.sessions.set(ws, session);
+  await room.handleMessage(ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.HELLO,
+    data: {
+      ticket: await mediaToken({
+        sub: `user-${index}`,
+        deviceId: `device-${index}`,
+        connectionMode,
+      }),
+      protocolVersion: 919,
+      contractRevision: 3,
+      mediaSessionId,
+    },
+  });
+  return { session, ws };
+}
+
 function baseClaims() {
   return {
     sub: "user-1",
@@ -155,6 +212,66 @@ test("rejects a valid ticket for a different channel during room authentication"
   assert.equal(ws.closeCode, 4003);
   assert.equal(room.participants.size, 0);
   assert.equal(messages.at(-1).data.error, "Media ticket channel mismatch");
+});
+
+test("enforces direct audio/video and auto channel participant ceilings", async () => {
+  const directAudioRoom = capacityRoom();
+  for (let index = 1; index <= 8; index++)
+    await authenticateParticipant(directAudioRoom, index, "direct");
+  const directAudioNinth = await authenticateParticipant(
+    directAudioRoom,
+    9,
+    "direct",
+  );
+  assert.equal(directAudioRoom.participants.size, 8);
+  assert.equal(
+    directAudioNinth.ws.messages.at(-1).data.code,
+    "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+  );
+  assert.equal(directAudioNinth.ws.closeCode.code, 4004);
+
+  const directVideoRoom = capacityRoom();
+  const firstVideoParticipant = await authenticateParticipant(
+    directVideoRoom,
+    1,
+    "direct",
+  );
+  await directVideoRoom.handleMessage(
+    firstVideoParticipant.ws,
+    firstVideoParticipant.session,
+    {
+      type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+      data: { sources: ["microphone", "camera"] },
+    },
+  );
+  for (let index = 2; index <= 4; index++)
+    await authenticateParticipant(directVideoRoom, index, "direct");
+  const directVideoFifth = await authenticateParticipant(
+    directVideoRoom,
+    5,
+    "direct",
+  );
+  assert.equal(directVideoRoom.participants.size, 4);
+  assert.equal(
+    directVideoFifth.ws.messages.at(-1).data.code,
+    "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+  );
+  assert.equal(directVideoFifth.ws.closeCode.code, 4004);
+
+  const autoRoom = capacityRoom();
+  for (let index = 1; index <= 100; index++)
+    await authenticateParticipant(autoRoom, index, "auto");
+  const autoOneHundredFirst = await authenticateParticipant(
+    autoRoom,
+    101,
+    "auto",
+  );
+  assert.equal(autoRoom.participants.size, 100);
+  assert.equal(
+    autoOneHundredFirst.ws.messages.at(-1).data.code,
+    "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+  );
+  assert.equal(autoOneHundredFirst.ws.closeCode.code, 4004);
 });
 
 test("signs provider tickets with the configured TTL", async () => {

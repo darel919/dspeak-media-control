@@ -67,13 +67,34 @@ export const SFU_PROVIDER = {
 
 export const CONTROL_HEARTBEAT_INTERVAL_MS = 30000;
 export const CONTROL_HEARTBEAT_TIMEOUT_MS = 90000;
+export const MAX_MEDIA_CHANNEL_PARTICIPANTS = 100;
 
 export const P2P_PARTICIPANT_LIMITS = {
-  directAudio: 12,
+  directAudio: 8,
   directVideo: 4,
   autoAudio: 8,
   autoVideo: 4,
 };
+
+export function getMediaChannelParticipantLimit(
+  connectionMode,
+  hasVideo = false,
+) {
+  if (connectionMode === "auto") return MAX_MEDIA_CHANNEL_PARTICIPANTS;
+  return hasVideo
+    ? P2P_PARTICIPANT_LIMITS.directVideo
+    : P2P_PARTICIPANT_LIMITS.directAudio;
+}
+
+export function getP2PQualificationLimit(connectionMode, hasVideo) {
+  return connectionMode === "direct"
+    ? hasVideo
+      ? P2P_PARTICIPANT_LIMITS.directVideo
+      : P2P_PARTICIPANT_LIMITS.directAudio
+    : hasVideo
+      ? P2P_PARTICIPANT_LIMITS.autoVideo
+      : P2P_PARTICIPANT_LIMITS.autoAudio;
+}
 
 export function checkP2PEligibility({
   connectionMode,
@@ -81,14 +102,7 @@ export function checkP2PEligibility({
   hasVideo,
   requiredSources = [],
 }) {
-  const limit =
-    connectionMode === "direct"
-      ? hasVideo
-        ? P2P_PARTICIPANT_LIMITS.directVideo
-        : P2P_PARTICIPANT_LIMITS.directAudio
-      : hasVideo
-        ? P2P_PARTICIPANT_LIMITS.autoVideo
-        : P2P_PARTICIPANT_LIMITS.autoAudio;
+  const limit = getP2PQualificationLimit(connectionMode, hasVideo);
   if (participantCount > limit)
     return {
       eligible: false,
