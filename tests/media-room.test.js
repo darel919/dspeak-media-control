@@ -140,6 +140,188 @@ test("duplicate media source announcements do not churn the source revision", as
   assert.deepEqual(session.sources, ["audio", "camera"]);
 });
 
+test("media capability updates persist and broadcast the independent codec matrix", async () => {
+  const instance = room();
+  const sender = {
+    serializeAttachment() {},
+    send() {},
+  };
+  const recipientMessages = [];
+  const recipient = {
+    send(message) {
+      recipientMessages.push(JSON.parse(message));
+    },
+  };
+  instance.participants.clear();
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws: sender,
+    sources: new Set(["camera"]),
+  });
+  instance.participants.set("user-2:device-2", {
+    userId: "user-2",
+    deviceId: "device-2",
+    peerId: "peer-2",
+    ws: recipient,
+    sources: new Set(["camera"]),
+  });
+  instance.isCurrentParticipantSession = () => true;
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+  };
+  const matrix = {
+    videoCodecs: {
+      H264: {
+        encode: {
+          supported: true,
+          acceleration: "hardware",
+          realtimeEfficiency: "excellent",
+        },
+        decode: {
+          supported: true,
+          acceleration: "hardware",
+          realtimeEfficiency: "excellent",
+        },
+      },
+      AV1: {
+        encode: {
+          supported: true,
+          acceleration: "hardware",
+          realtimeEfficiency: "excellent",
+        },
+        decode: {
+          supported: true,
+          acceleration: "hardware",
+          realtimeEfficiency: "excellent",
+        },
+      },
+    },
+    concurrentEncode: {
+      supported: true,
+      maxHardwareSessions: 1,
+    },
+  };
+
+  await handleRoomMessage(instance, sender, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES,
+    data: {
+      mediaCapabilities: matrix,
+      capabilityProtocol: "video-codec-matrix-v1",
+    },
+  });
+
+  const stored = instance.participants.get("user-1:device-1");
+  assert.equal(
+    stored.mediaCapabilities.videoCodecs.H264.encode.acceleration,
+    "hardware",
+  );
+  assert.equal(
+    stored.mediaCapabilities.videoCodecs.AV1.decode.realtimeEfficiency,
+    "excellent",
+  );
+  const update = recipientMessages.find(
+    (message) =>
+      message.type === MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_CAPABILITIES,
+  );
+  assert.equal(update.data.peerId, "peer-1");
+  assert.equal(
+    update.data.mediaCapabilities.concurrentEncode.maxHardwareSessions,
+    1,
+  );
+});
+
+test("Cloudflare codec variants coexist under one logical publication", async () => {
+  const instance = room();
+  const sender = {
+    serializeAttachment() {},
+    send() {},
+  };
+  const session = {
+    authenticated: true,
+    cloudflareSessionId: "cloudflare-session",
+    deviceId: "device-1",
+    userId: "user-1",
+    peerId: "peer-1",
+  };
+  instance.participants.clear();
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws: sender,
+  });
+  instance.isCurrentParticipantSession = () => true;
+  const publish = (variantId, trackName, codec, metadata = {}) =>
+    handleRoomMessage(instance, sender, session, {
+      type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION,
+      data: {
+        trackName,
+        source: "camera",
+        logicalStreamId: "user:user-1/camera",
+        variantId,
+        codec,
+        ...metadata,
+      },
+    });
+
+  await publish("user:user-1/camera:h264", "track-h264", "H264", {
+    width: 1280,
+    height: 720,
+    fps: 30,
+    bitrate: 2400000,
+    target: {
+      width: 960,
+      height: 540,
+      fps: 24,
+      bitrate: 1600000,
+    },
+    targetAdjusted: true,
+  });
+  await publish("user:user-1/camera:vp8", "track-vp8", "VP8");
+  assert.equal(instance.publishedSources.size, 2);
+  await publish("user:user-1/camera:vp8", "track-vp8-next", "VP8");
+  assert.equal(instance.publishedSources.size, 2);
+  assert.equal(
+    [...instance.publishedSources.values()].find(
+      (publication) => publication.variantId === "user:user-1/camera:vp8",
+    ).trackName,
+    "track-vp8-next",
+  );
+  assert.deepEqual(
+    [...instance.publishedSources.values()].find(
+      (publication) => publication.variantId === "user:user-1/camera:h264",
+    ),
+    {
+      sessionId: "cloudflare-session",
+      trackName: "track-h264",
+      source: "camera",
+      ownerSource: null,
+      userId: "user-1",
+      peerId: "peer-1",
+      logicalStreamId: "user:user-1/camera",
+      variantId: "user:user-1/camera:h264",
+      codec: "H264",
+      width: 1280,
+      height: 720,
+      fps: 30,
+      bitrate: 2400000,
+      target: {
+        width: 960,
+        height: 540,
+        fps: 24,
+        bitrate: 1600000,
+      },
+      targetAdjusted: true,
+      closed: false,
+    },
+  );
+});
+
 test("mediasoup transitions still require provider readiness", async () => {
   const instance = room();
   const route = createSFURoute(SFU_PROVIDER.MEDIASOUP, 2, 0, "test");

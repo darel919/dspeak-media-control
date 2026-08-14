@@ -13,6 +13,8 @@ import {
   normalizeParticipantVoiceState,
   normalizeMediaSources,
   isVideoMediaSource,
+  mediaPublicationKey,
+  normalizeMediaCapabilities,
 } from "./media-room-contracts.ts";
 import {
   handleCloudflareRequest,
@@ -25,6 +27,42 @@ import {
 } from "./media-room-provider.ts";
 import { mediaDebug } from "./debug.ts";
 import { normalizeQoePath } from "./qoe.ts";
+
+function participantCapabilityPayload(participant) {
+  if (!participant) return null;
+  const mediaCapabilities =
+    participant.mediaCapabilities ||
+    normalizeMediaCapabilities({
+      source: "fallback",
+    });
+  return {
+    participantId: String(participant.peerId || ""),
+    peerId: String(participant.peerId || ""),
+    userId: String(participant.userId || ""),
+    deviceId: String(participant.deviceId || ""),
+    mediaCapabilities,
+    capabilityProtocol: String(
+      participant.capabilityProtocol || "video-codec-matrix-v1",
+    ),
+  };
+}
+
+function broadcastParticipantCapabilities(
+  room,
+  participant,
+  excludedWs = null,
+) {
+  const payload = participantCapabilityPayload(participant);
+  if (!payload) return false;
+  for (const recipient of room.participants.values())
+    if (recipient.ws && recipient.ws !== excludedWs)
+      room.sendMessage(
+        recipient.ws,
+        MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_CAPABILITIES,
+        payload,
+      );
+  return true;
+}
 
 export async function handleRoomMessage(room, ws, session, envelope) {
   const data =
@@ -120,6 +158,25 @@ export async function handleRoomMessage(room, ws, session, envelope) {
               ...voiceState,
             },
           );
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES: {
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      const mediaCapabilities = normalizeMediaCapabilities(
+        data.mediaCapabilities,
+      );
+      if (!participant || !mediaCapabilities) break;
+      participant.mediaCapabilities = mediaCapabilities;
+      participant.capabilityProtocol =
+        typeof data.capabilityProtocol === "string"
+          ? data.capabilityProtocol
+          : participant.capabilityProtocol;
+      session.mediaCapabilities = mediaCapabilities;
+      session.capabilityProtocol = participant.capabilityProtocol;
+      ws.serializeAttachment(session);
+      broadcastParticipantCapabilities(room, participant, ws);
       break;
     }
     case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
@@ -447,6 +504,14 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   session.providerCapabilities = Array.isArray(data.providerCapabilities)
     ? data.providerCapabilities.filter((provider) => configured.has(provider))
     : [...configured];
+  session.mediaCapabilities =
+    normalizeMediaCapabilities(data.mediaCapabilities) ||
+    resumedParticipant?.mediaCapabilities ||
+    null;
+  session.capabilityProtocol =
+    typeof data.capabilityProtocol === "string"
+      ? data.capabilityProtocol
+      : resumedParticipant?.capabilityProtocol || "video-codec-matrix-v1";
   ws.serializeAttachment(session);
   mediaDebug(room.env, "room.client-authenticated", {
     peerId: session.peerId,
@@ -468,9 +533,24 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     deafened: session.deafened,
     joinedAt: resumedParticipant?.joinedAt || now,
     disconnectedAt: null,
+    mediaCapabilities: session.mediaCapabilities,
+    capabilityProtocol: session.capabilityProtocol,
   });
   await room.refreshPendingRouteSourceRevision?.();
-  room.sendMessage(ws, "connected", { peerId: session.peerId });
+  const participants = [...room.participants.values()]
+    .filter((participant) => participant.peerId !== session.peerId)
+    .map(participantCapabilityPayload)
+    .filter(Boolean);
+  room.sendMessage(ws, "connected", {
+    peerId: session.peerId,
+    participants,
+    inRoom: participants,
+  });
+  broadcastParticipantCapabilities(
+    room,
+    room.participants.get(participantKey),
+    ws,
+  );
   if (room.participants.size === 1 && room.epoch === 0)
     await room.commitRoute(room.createInitialRoute("single-participant"));
   else room.sendTopology(ws);
@@ -549,6 +629,15 @@ async function handleCloudflarePublication(room, ws, session, data) {
     !source
   )
     return;
+  const target =
+    data.target && typeof data.target === "object"
+      ? Object.fromEntries(
+          ["width", "height", "fps", "bitrate"]
+            .map((field) => [field, Number(data.target[field])])
+            .filter(([, value]) => Number.isFinite(value) && value > 0)
+            .map(([field, value]) => [field, Math.floor(value)]),
+        )
+      : {};
   const publication = {
     sessionId: session.cloudflareSessionId,
     trackName: data.trackName,
@@ -556,11 +645,72 @@ async function handleCloudflarePublication(room, ws, session, data) {
     ownerSource: normalizeMediaOwnerSource(source, data.ownerSource),
     userId: session.userId,
     peerId: session.peerId,
+    ...(typeof data.logicalStreamId === "string"
+      ? { logicalStreamId: data.logicalStreamId.slice(0, 256) }
+      : {}),
+    ...(Number.isSafeInteger(Number(data.generation)) &&
+    Number(data.generation) > 0
+      ? { generation: Math.floor(Number(data.generation)) }
+      : {}),
+    ...(typeof data.variantId === "string" && data.variantId.length <= 256
+      ? { variantId: data.variantId }
+      : {}),
+    ...(typeof data.codec === "string" && data.codec.length <= 16
+      ? { codec: data.codec.toUpperCase() }
+      : {}),
+    ...(data.codecAcceleration === "hardware" ||
+    data.codecAcceleration === "software" ||
+    data.codecAcceleration === "unsupported"
+      ? { codecAcceleration: data.codecAcceleration }
+      : {}),
+    ...(typeof data.codecImplementation === "string" &&
+    data.codecImplementation.length <= 128
+      ? { codecImplementation: data.codecImplementation }
+      : {}),
+    ...(Number.isFinite(Number(data.width)) && Number(data.width) > 0
+      ? { width: Math.floor(Number(data.width)) }
+      : {}),
+    ...(Number.isFinite(Number(data.height)) && Number(data.height) > 0
+      ? { height: Math.floor(Number(data.height)) }
+      : {}),
+    ...(Number.isFinite(Number(data.fps)) && Number(data.fps) > 0
+      ? { fps: Math.floor(Number(data.fps)) }
+      : {}),
+    ...(Number.isFinite(Number(data.bitrate)) && Number(data.bitrate) > 0
+      ? { bitrate: Math.floor(Number(data.bitrate)) }
+      : {}),
+    ...(Object.keys(target).length ? { target } : {}),
+    ...(data.targetAdjusted === true ? { targetAdjusted: true } : {}),
+    ...(Array.isArray(data.receivers)
+      ? {
+          receivers: [
+            ...new Set(
+              data.receivers.filter(
+                (receiver) =>
+                  typeof receiver === "string" && receiver.length <= 128,
+              ),
+            ),
+          ].slice(0, 100),
+        }
+      : {}),
+    ...(data.emergency === true ? { emergency: true } : {}),
+    ...(Number.isFinite(Number(data.score))
+      ? { score: Number(data.score) }
+      : {}),
     closed: data.closed === true,
   };
-  const publicationKey = `${session.peerId}:${source}`;
-  if (publication.closed) room.publishedSources.delete(publicationKey);
-  else room.publishedSources.set(publicationKey, publication);
+  const publicationKey = mediaPublicationKey(publication);
+  if (publication.closed) {
+    for (const [key, current] of room.publishedSources)
+      if (
+        current.peerId === publication.peerId &&
+        current.source === publication.source &&
+        (!publication.variantId ||
+          current.variantId === publication.variantId) &&
+        (!publication.trackName || current.trackName === publication.trackName)
+      )
+        room.publishedSources.delete(key);
+  } else room.publishedSources.set(publicationKey, publication);
   await room.state.storage.put("publishedSources", [
     ...room.publishedSources.values(),
   ]);

@@ -14,6 +14,7 @@ import {
 import {
   MAX_CONTROL_MESSAGE_BYTES,
   controlMessageByteLength,
+  mediaPublicationKey,
   normalizeMediaSources,
 } from "./media-room-contracts.ts";
 import { handleRoomMessage, verifyRoomTicket } from "./media-room-messages.ts";
@@ -142,6 +143,8 @@ export class MediaRoomDO {
       lastHeartbeat: Date.now(),
       mediaSessionId: crypto.randomUUID(),
       providerCapabilities: [...this.getConfiguredProviderCapabilities()],
+      mediaCapabilities: null,
+      capabilityProtocol: "video-codec-matrix-v1",
       sources: [],
       muted: true,
       deafened: false,
@@ -309,7 +312,7 @@ export class MediaRoomDO {
     if (Array.isArray(publishedSources))
       this.publishedSources = new Map(
         publishedSources.map((publication) => [
-          `${publication.peerId}:${publication.source}`,
+          mediaPublicationKey(publication),
           publication,
         ]),
       );
@@ -401,6 +404,9 @@ export class MediaRoomDO {
           ws,
           sources: new Set(restored.sources || []),
           providerCapabilities: new Set(restored.providerCapabilities || []),
+          mediaCapabilities: restored.mediaCapabilities || null,
+          capabilityProtocol:
+            restored.capabilityProtocol || "video-codec-matrix-v1",
           muted: restored.muted !== false,
           deafened: restored.deafened === true,
           joinedAt: restored.joinedAt || Date.now(),
@@ -748,6 +754,9 @@ export class MediaRoomDO {
       sources: [...participant.sources],
       muted: participant.muted !== false,
       deafened: participant.deafened === true,
+      mediaCapabilities: participant.mediaCapabilities || null,
+      capabilityProtocol:
+        participant.capabilityProtocol || "video-codec-matrix-v1",
     }));
   }
 

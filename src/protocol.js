@@ -12,6 +12,8 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   P2P_READY: "p2p-ready",
   MEDIA_SOURCES: "media-sources",
   PARTICIPANT_VOICE_STATE: "participant-voice-state",
+  MEDIA_CAPABILITIES: "media-capabilities",
+  PARTICIPANT_CAPABILITIES: "participant-capabilities",
   P2P_QUALIFIED: "p2p-qualified",
   P2P_FAILED: "p2p-failed",
   PROVIDER_READY: "provider-ready",
