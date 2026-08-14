@@ -1515,6 +1515,82 @@ test("Cloudflare publications retain safe screen audio ownership", async () => {
   );
 });
 
+test("Cloudflare codec migration acknowledgements return to the publication owner", async () => {
+  const instance = room();
+  const publisherMessages = [];
+  const publisher = {
+    send(message) {
+      publisherMessages.push(JSON.parse(message));
+    },
+  };
+  const receiver = { send() {} };
+  instance.participants.clear();
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws: publisher,
+  });
+  instance.participants.set("user-2:device-2", {
+    userId: "user-2",
+    deviceId: "device-2",
+    peerId: "peer-2",
+    ws: receiver,
+  });
+  instance.isCurrentParticipantSession = () => true;
+  const publisherSession = {
+    authenticated: true,
+    cloudflareSessionId: "publisher-session",
+    deviceId: "device-1",
+    userId: "user-1",
+    peerId: "peer-1",
+  };
+  await handleRoomMessage(instance, publisher, publisherSession, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION,
+    data: {
+      trackName: "camera-h264",
+      source: "camera",
+      logicalStreamId: "user:user-1/camera",
+      variantId: "user:user-1/camera:h264",
+      generation: 2,
+      codec: "H264",
+      receivers: ["peer-2"],
+    },
+  });
+
+  await handleRoomMessage(
+    instance,
+    receiver,
+    {
+      authenticated: true,
+      deviceId: "device-2",
+      userId: "user-2",
+      peerId: "peer-2",
+    },
+    {
+      type: MEDIA_CONTROL_MESSAGE_TYPES.CODEC_MIGRATION_STATE,
+      data: {
+        receiverId: "peer-2",
+        logicalStreamId: "user:user-1/camera",
+        variantId: "user:user-1/camera:h264",
+        generation: 2,
+        state: "stable",
+      },
+    },
+  );
+
+  assert.deepEqual(publisherMessages.at(-1), {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.CODEC_MIGRATION_STATE,
+    data: {
+      receiverId: "peer-2",
+      logicalStreamId: "user:user-1/camera",
+      variantId: "user:user-1/camera:h264",
+      generation: 2,
+      state: "stable",
+    },
+  });
+});
+
 test("a failed P2P qualification restores a healthy fallback SFU", async () => {
   const instance = room();
   instance.route = createP2PRoute("direct", 5, 7, "qualifying-direct");

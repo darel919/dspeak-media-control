@@ -179,6 +179,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       broadcastParticipantCapabilities(room, participant, ws);
       break;
     }
+    case MEDIA_CONTROL_MESSAGE_TYPES.CODEC_MIGRATION_STATE:
+      relayCodecMigrationState(room, ws, session, data);
+      break;
     case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
       const participant = room.participants.get(
         `${session.userId}:${session.deviceId}`,
@@ -433,6 +436,68 @@ function relayClientSfuRtt(room, ws, session, data) {
       },
     );
   }
+}
+
+function relayCodecMigrationState(room, ws, session, data) {
+  const logicalStreamId =
+    typeof data.logicalStreamId === "string" &&
+    data.logicalStreamId.length > 0 &&
+    data.logicalStreamId.length <= 256
+      ? data.logicalStreamId
+      : null;
+  const variantId =
+    typeof data.variantId === "string" &&
+    data.variantId.length > 0 &&
+    data.variantId.length <= 256
+      ? data.variantId
+      : null;
+  const state =
+    data.state === "stable" || data.state === "abort" ? data.state : null;
+  const generation = Number(data.generation);
+  if (
+    !logicalStreamId ||
+    !variantId ||
+    !state ||
+    !Number.isSafeInteger(generation) ||
+    generation < 1
+  )
+    return false;
+  if (data.receiverId != null && String(data.receiverId) !== session.peerId)
+    return false;
+  const publication = [...room.publishedSources.values()].find((candidate) => {
+    if (
+      candidate.peerId === session.peerId ||
+      candidate.logicalStreamId !== logicalStreamId ||
+      candidate.variantId !== variantId ||
+      Math.max(1, Math.floor(Number(candidate.generation) || 1)) !== generation
+    )
+      return false;
+    if (!Array.isArray(candidate.receivers) || candidate.receivers.length === 0)
+      return true;
+    return candidate.receivers.map(String).includes(String(session.peerId));
+  });
+  if (!publication) return false;
+  const publisher = [...room.participants.values()].find(
+    (participant) =>
+      participant.peerId === publication.peerId && participant.ws,
+  );
+  if (!publisher) return false;
+  const reason =
+    typeof data.reason === "string" && data.reason.length <= 256
+      ? data.reason
+      : null;
+  return room.sendMessage(
+    publisher.ws,
+    MEDIA_CONTROL_MESSAGE_TYPES.CODEC_MIGRATION_STATE,
+    {
+      receiverId: session.peerId,
+      logicalStreamId,
+      variantId,
+      generation,
+      state,
+      ...(reason ? { reason } : {}),
+    },
+  );
 }
 
 async function authenticateRoomSession(room, ws, session, type, data, now) {
