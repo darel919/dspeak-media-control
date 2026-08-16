@@ -81,7 +81,7 @@ async function authenticateParticipant(room, index, connectionMode) {
         connectionMode,
       }),
       protocolVersion: 919,
-      contractRevision: 3,
+      contractRevision: 5,
       mediaSessionId,
     },
   });
@@ -204,7 +204,7 @@ test("rejects a valid ticket for a different channel during room authentication"
     data: {
       ticket: await mediaToken({ channelId: "other-channel" }),
       protocolVersion: 919,
-      contractRevision: 3,
+      contractRevision: 5,
       mediaSessionId: "media-session-1",
     },
   });

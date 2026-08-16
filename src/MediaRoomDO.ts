@@ -1,12 +1,15 @@
 import {
   CONTROL_HEARTBEAT_INTERVAL_MS,
   CONTROL_HEARTBEAT_TIMEOUT_MS,
+  CONTROL_GRACE_PERIOD_MS,
   MEDIA_CONTROL_CONTRACT_REVISION,
   MEDIA_CONTROL_CLIENT_HELLO,
   MEDIA_CONTROL_MESSAGE_TYPES,
   MEDIA_CONTROL_PROTOCOL_VERSION,
   MEDIA_CONTROL_SERVER_HELLO,
   MEDIA_ROUTE_KIND,
+  OPERATION_ID,
+  ROOM_REVISION,
   SFU_PROVIDER,
   createLocalRoute,
   validateRouteForMode,
@@ -68,6 +71,7 @@ export class MediaRoomDO {
     this.providerConfig = null;
     this.sourceRevision = 0;
     this.epoch = 0;
+    this.roomRevision = 0n;
     this.transitionGeneration = 0;
     this.transitionInFlight = false;
     this.qualifiedParticipantSignature = null;
@@ -76,6 +80,10 @@ export class MediaRoomDO {
     this.qualificationParticipantSignature = null;
     this.pendingRouteRefresh = null;
     this.stateLoaded = false;
+    this.operationHistory = new Set();
+    this.operationResults = new Map();
+    this.maxOperationHistory = 1000;
+    this.leavePending = new Set();
   }
 
   async fetch(request) {
@@ -146,9 +154,11 @@ export class MediaRoomDO {
       mediaCapabilities: null,
       capabilityProtocol: "video-codec-matrix-v1",
       sources: [],
+      sourceStates: {},
       muted: true,
       deafened: false,
       joinedAt: Date.now(),
+      connectionEpoch: 1,
     };
     this.state.acceptWebSocket(ws);
     ws.serializeAttachment(session);
@@ -170,6 +180,9 @@ export class MediaRoomDO {
           heartbeatIntervalMs: CONTROL_HEARTBEAT_INTERVAL_MS,
           heartbeatTimeoutMs: CONTROL_HEARTBEAT_TIMEOUT_MS,
           serverTime: Date.now(),
+          roomRevision: this.roomRevision.toString(),
+          epoch: this.epoch,
+          sourceRevision: this.sourceRevision,
         },
       }),
     );
@@ -197,6 +210,12 @@ export class MediaRoomDO {
         authenticated: session?.authenticated === true,
       });
       await handleRoomMessage(this, ws, session, data);
+      if (
+        data?.type === MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT &&
+        session?.authenticated
+      ) {
+        ws.serializeAttachment(session);
+      }
     } catch (error) {
       console.error("[MediaRoomDO] Message parse error:", error);
       mediaDebug(this.env, "room.message-invalid", { error });
@@ -231,7 +250,7 @@ export class MediaRoomDO {
     for (const [participantKey, participant] of this.participants)
       if (
         participant.disconnectedAt &&
-        now - participant.disconnectedAt >= 10_000
+        now - participant.disconnectedAt >= CONTROL_GRACE_PERIOD_MS
       )
         await this.finalizeParticipantDisconnect(participantKey, participant);
     if (sockets.length > 0 || this.participants.size > 0)
@@ -279,6 +298,7 @@ export class MediaRoomDO {
       route,
       epoch,
       sourceRevision,
+      roomRevision,
       pendingRoute,
       pendingStartedAt,
       publishedSources,
@@ -292,6 +312,7 @@ export class MediaRoomDO {
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
       this.state.storage.get("sourceRevision"),
+      this.state.storage.get("roomRevision"),
       this.state.storage.get("pendingRoute"),
       this.state.storage.get("pendingStartedAt"),
       this.state.storage.get("publishedSources"),
@@ -306,6 +327,8 @@ export class MediaRoomDO {
     if (Number.isSafeInteger(epoch)) this.epoch = epoch;
     if (Number.isSafeInteger(sourceRevision))
       this.sourceRevision = sourceRevision;
+    if (typeof roomRevision === "bigint" || typeof roomRevision === "number")
+      this.roomRevision = BigInt(roomRevision);
     if (pendingRoute) this.pendingRoute = pendingRoute;
     if (Number.isSafeInteger(pendingStartedAt))
       this.pendingStartedAt = pendingStartedAt;
@@ -355,6 +378,7 @@ export class MediaRoomDO {
 
   async resetDormantRoomState() {
     this.sourceRevision++;
+    this.roomRevision++;
     this.epoch = Math.max(this.epoch, Number(this.route.epoch) || 0) + 1;
     this.route = createLocalRoute(
       this.epoch,
@@ -375,6 +399,7 @@ export class MediaRoomDO {
       this.state.storage.put("route", this.route),
       this.state.storage.put("epoch", this.epoch),
       this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put("roomRevision", this.roomRevision),
       this.state.storage.put("publishedSources", []),
       this.state.storage.put("providerHealth", {}),
       this.state.storage.put("qualifiedParticipantSignature", null),
@@ -396,6 +421,9 @@ export class MediaRoomDO {
       const participantKey = `${restored.userId}:${restored.deviceId}`;
       const previousParticipant = this.participants.get(participantKey);
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
+        const connectionEpoch = previousParticipant?.connectionEpoch
+          ? previousParticipant.connectionEpoch + 1
+          : 1;
         this.participants.set(participantKey, {
           userId: restored.userId,
           deviceId: restored.deviceId,
@@ -403,6 +431,7 @@ export class MediaRoomDO {
           peerId: restored.peerId,
           ws,
           sources: new Set(restored.sources || []),
+          sourceStates: restored.sourceStates || {},
           providerCapabilities: new Set(restored.providerCapabilities || []),
           mediaCapabilities: restored.mediaCapabilities || null,
           capabilityProtocol:
@@ -410,6 +439,7 @@ export class MediaRoomDO {
           muted: restored.muted !== false,
           deafened: restored.deafened === true,
           joinedAt: restored.joinedAt || Date.now(),
+          connectionEpoch,
         });
         if (Array.isArray(restored.qualifiedPeerIds))
           this.qualificationState.set(restored.peerId, {
@@ -560,11 +590,13 @@ export class MediaRoomDO {
     }
     this.qualifiedParticipantSignature = null;
     this.sourceRevision++;
+    this.roomRevision++;
     void Promise.all([
       this.state.storage.put("publishedSources", [
         ...this.publishedSources.values(),
       ]),
       this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put("roomRevision", this.roomRevision),
       this.state.storage.put(
         "qualifiedParticipantSignature",
         this.qualifiedParticipantSignature,
@@ -747,17 +779,63 @@ export class MediaRoomDO {
   }
 
   getParticipantList() {
-    return [...this.participants.values()].map((participant) => ({
-      peerId: participant.peerId,
-      userId: participant.userId,
-      deviceId: participant.deviceId,
-      sources: [...participant.sources],
-      muted: participant.muted !== false,
-      deafened: participant.deafened === true,
-      mediaCapabilities: participant.mediaCapabilities || null,
-      capabilityProtocol:
-        participant.capabilityProtocol || "video-codec-matrix-v1",
-    }));
+    const now = Date.now();
+    return [...this.participants.values()].map((participant) => {
+      const disconnectedFor =
+        participant.status === "disconnected" && participant.disconnectedAt
+          ? now - participant.disconnectedAt
+          : null;
+      const inGrace =
+        disconnectedFor !== null && disconnectedFor <= CONTROL_GRACE_PERIOD_MS;
+      return {
+        peerId: participant.peerId,
+        userId: participant.userId,
+        deviceId: participant.deviceId,
+        sources: [...participant.sources],
+        sourceStates: participant.sourceStates || {},
+        muted: participant.muted !== false,
+        deafened: participant.deafened === true,
+        mediaCapabilities: participant.mediaCapabilities || null,
+        capabilityProtocol:
+          participant.capabilityProtocol || "video-codec-matrix-v1",
+        connectionEpoch: participant.connectionEpoch || 1,
+        status: inGrace
+          ? "grace"
+          : participant.status === "disconnected"
+            ? "left"
+            : participant.status || "connected",
+        lastSeenAt: participant.lastSeenAt || null,
+      };
+    });
+  }
+
+  buildTopologySnapshot() {
+    const pending = this.pendingRoute;
+    return {
+      route: this.route,
+      mode: pending
+        ? "switching"
+        : this.route.kind === MEDIA_ROUTE_KIND.LOCAL
+          ? "idle"
+          : this.route.kind === MEDIA_ROUTE_KIND.P2P
+            ? this.route.reason === "qualifying-direct"
+              ? "probing"
+              : "p2p"
+            : "sfu",
+      epoch: pending?.epoch || this.epoch,
+      sourceRevision: this.sourceRevision,
+      roomRevision: this.roomRevision.toString(),
+      participants: this.getParticipantList(),
+      peers: this.getParticipantList(),
+      provider: pending?.provider || this.route.provider,
+      providerId: pending?.providerId || this.route.providerId,
+      reason: pending?.reason || this.route.reason,
+      target: pending ? "sfu" : undefined,
+      targetProvider: pending?.provider,
+      targetProviderId: pending?.providerId,
+      targetRoute: pending,
+      publishedSources: [...this.publishedSources.values()],
+    };
   }
 
   getConnectionMode() {
@@ -788,6 +866,7 @@ export class MediaRoomDO {
       );
       if (participant?.ws === ws) {
         participant.ws = null;
+        participant.status = "disconnected";
         participant.disconnectedAt = Date.now();
         this.startControlLeaseTimer();
       }
@@ -799,6 +878,7 @@ export class MediaRoomDO {
   async finalizeParticipantDisconnect(participantKey, participant) {
     if (!this.participants.delete(participantKey)) return;
     this.sourceRevision++;
+    this.roomRevision++;
     this.qualifiedParticipantSignature = null;
     this.qualificationState.delete(participant.peerId);
     this.providerReadiness.delete(participant.peerId);
@@ -809,6 +889,7 @@ export class MediaRoomDO {
         ...this.publishedSources.values(),
       ]),
       this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put("roomRevision", this.roomRevision),
       this.state.storage.put(
         "qualifiedParticipantSignature",
         this.qualifiedParticipantSignature,

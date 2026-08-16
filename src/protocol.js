@@ -1,6 +1,13 @@
 export const MEDIA_CONTROL_PROTOCOL_VERSION = 919;
-export const MEDIA_CONTROL_CONTRACT_REVISION = 3;
+export const MEDIA_CONTROL_CONTRACT_REVISION = 5;
 export const MEDIA_PROVIDER_PROTOCOL_REVISION = 919;
+
+export const ROOM_REVISION = "roomRevision";
+export const CONNECTION_EPOCH = "connectionEpoch";
+export const OPERATION_ID = "operationId";
+export const REQUEST_ID = "requestId";
+export const SOURCE_GENERATION = "sourceGeneration";
+export const DESIRED_STATE = "desiredState";
 
 export const MEDIA_CONTROL_CLIENT_HELLO = "hello919";
 export const MEDIA_CONTROL_SERVER_HELLO = "hi919";
@@ -28,12 +35,17 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   CLIENT_SFU_RTT: "client-sfu-rtt",
   HEARTBEAT: "heartbeat",
   RESUME: "resume",
+  STATE_NACK: "state-nack",
+  ROOM_SNAPSHOT: "room-snapshot",
+  LEAVE: "leave",
+  REQUEST_SNAPSHOT: "request-snapshot",
 
   WELCOME: MEDIA_CONTROL_SERVER_HELLO,
   TOPOLOGY_STATE: "topology-state",
   P2P_SIGNAL_RELAY: "p2p-signal-relay",
   ROUTE_COMMIT: "route-commit",
   HEARTBEAT_ACK: "heartbeat-ack",
+  OPERATION_ACK: "operation-ack",
   ERROR: MEDIA_CONTROL_ERROR,
   PROVIDER_TICKET: "provider-ticket",
   CLOUDFLARE_RESPONSE: "cloudflare-response",
@@ -68,8 +80,9 @@ export const SFU_PROVIDER = {
   MEDIASOUP: "mediasoup",
 };
 
-export const CONTROL_HEARTBEAT_INTERVAL_MS = 30000;
-export const CONTROL_HEARTBEAT_TIMEOUT_MS = 90000;
+export const CONTROL_HEARTBEAT_INTERVAL_MS = 5000;
+export const CONTROL_HEARTBEAT_TIMEOUT_MS = 15000;
+export const CONTROL_GRACE_PERIOD_MS = 10000;
 export const MAX_MEDIA_CHANNEL_PARTICIPANTS = 100;
 
 export const P2P_PARTICIPANT_LIMITS = {

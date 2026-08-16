@@ -73,6 +73,34 @@ export async function handleRoomMessage(room, ws, session, envelope) {
   const now = Date.now();
   session.lastHeartbeat = now;
 
+  const operationId = data?.operationId;
+  const isMutation =
+    type === MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED;
+  if (operationId && isMutation) {
+    if (room.operationHistory.has(operationId)) {
+      mediaDebug(room.env, "room.duplicate-operation", {
+        operationId,
+        type,
+        peerId: session.peerId,
+      });
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+        code: "DUPLICATE_OPERATION",
+        error: "Operation already processed",
+        operationId,
+      });
+      return;
+    }
+    room.operationHistory.add(operationId);
+    if (room.operationHistory.size > room.maxOperationHistory) {
+      const first = room.operationHistory.values().next().value;
+      room.operationHistory.delete(first);
+    }
+  }
+
   if (!session.authenticated) {
     await authenticateRoomSession(room, ws, session, type, data, now);
     return;
@@ -84,12 +112,95 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     ws.close(4000, "Media session superseded");
     return;
   }
+  const clientEpoch = Number(data.connectionEpoch);
+  const sessionEpoch = Number(session.connectionEpoch);
+  const staleEpoch =
+    Number.isSafeInteger(clientEpoch) &&
+    Number.isSafeInteger(sessionEpoch) &&
+    clientEpoch !== sessionEpoch;
+  if (
+    isMutation &&
+    staleEpoch &&
+    ![
+      MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES,
+      MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY,
+      MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED,
+    ].includes(type)
+  ) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      code: "STALE_CONNECTION_EPOCH",
+      error: "Mutation from a superseded connection epoch",
+      operationId,
+      connectionEpoch: sessionEpoch,
+    });
+    return;
+  }
+  const expectedRoomRevision = Number(data.expectedRoomRevision);
+  if (
+    isMutation &&
+    Number.isSafeInteger(expectedRoomRevision) &&
+    expectedRoomRevision !== Number(room.roomRevision)
+  ) {
+    room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+      code: "ROOM_REVISION_CONFLICT",
+      error: "Expected room revision does not match canonical room revision",
+      operationId,
+      accepted: false,
+      roomRevision: room.roomRevision.toString(),
+      canonicalState: room.buildTopologySnapshot
+        ? room.buildTopologySnapshot()
+        : undefined,
+    });
+    return;
+  }
 
   switch (type) {
     case MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT: {
+      const clientTopologyEpoch = Number(data.topologyEpoch);
+      const clientSourceRevision = Number(data.sourceRevision);
+      const clientRoomRevision = Number(data.lastAppliedRoomRevision);
+      const clientConnectionEpoch = Number(data.connectionEpoch);
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      if (participant && participant.ws === ws) {
+        participant.lastSeenAt = now;
+        participant.status = "connected";
+        participant.disconnectedAt = null;
+      }
+      const stateMismatch =
+        (Number.isSafeInteger(clientTopologyEpoch) &&
+          clientTopologyEpoch !== room.epoch) ||
+        (Number.isSafeInteger(clientSourceRevision) &&
+          clientSourceRevision !== room.sourceRevision) ||
+        (Number.isSafeInteger(clientRoomRevision) &&
+          clientRoomRevision !== Number(room.roomRevision)) ||
+        (Number.isSafeInteger(clientConnectionEpoch) &&
+          Number.isSafeInteger(session.connectionEpoch) &&
+          clientConnectionEpoch !== Number(session.connectionEpoch));
+      if (stateMismatch) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.STATE_NACK, {
+          sequence: data.sequence,
+          topology: room.buildTopologySnapshot(),
+          roomRevision: room.roomRevision.toString(),
+          epoch: room.epoch,
+          sourceRevision: room.sourceRevision,
+        });
+        break;
+      }
       room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT_ACK, {
         sequence: data.sequence,
         timestamp: now,
+        roomRevision: room.roomRevision.toString(),
+        epoch: room.epoch,
+        sourceRevision: room.sourceRevision,
+        publishedSourcesDigest: [...room.publishedSources.values()].map(
+          (publication) => ({
+            source: publication.source,
+            peerId: publication.peerId,
+            generation: publication.generation,
+          }),
+        ),
       });
       break;
     }
@@ -147,6 +258,16 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       session.muted = voiceState.muted;
       session.deafened = voiceState.deafened;
       ws.serializeAttachment(session);
+      room.roomRevision++;
+      void room.state.storage.put("roomRevision", room.roomRevision);
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
+        operationId,
+        accepted: true,
+        roomRevision: String(room.roomRevision || 0),
+        canonicalState: room.buildTopologySnapshot
+          ? room.buildTopologySnapshot()
+          : undefined,
+      });
       for (const recipient of room.participants.values())
         if (recipient.ws)
           room.sendMessage(
@@ -229,9 +350,57 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       participant.sources = new Set(sources);
       session.sources = [...participant.sources];
       ws.serializeAttachment(session);
+      if (!participant.sourceStates) participant.sourceStates = {};
+      const nowFs = Date.now();
+      for (const source of sourceSet) {
+        const previousState = participant.sourceStates[source] || {
+          generation: 0,
+          desiredState: "inactive",
+          publicationState: "unpublished",
+          provider: null,
+        };
+        const desired =
+          participant.sources.has(source) && !participant.muted
+            ? "active"
+            : "inactive";
+        participant.sourceStates[source] = {
+          ...previousState,
+          desiredState: desired,
+          generation: previousState.generation + 1,
+          publicationState: sourceSet.has(source)
+            ? previousState.publicationState === "published"
+              ? "published"
+              : "announced"
+            : "unpublished",
+          provider: previousState.provider,
+          updatedAt: nowFs,
+        };
+      }
+      for (const previousSource of previousSources) {
+        if (!sourceSet.has(previousSource)) {
+          participant.sourceStates[previousSource] = {
+            generation:
+              (participant.sourceStates[previousSource]?.generation || 0) + 1,
+            desiredState: "inactive",
+            publicationState: "unpublished",
+            provider: null,
+            updatedAt: nowFs,
+          };
+        }
+      }
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
+        operationId,
+        accepted: true,
+        roomRevision: String(room.roomRevision || 0),
+        canonicalState: room.buildTopologySnapshot
+          ? room.buildTopologySnapshot()
+          : undefined,
+      });
       if (!sourcesChanged && stalePublications.length === 0) break;
+      room.roomRevision++;
       room.sourceRevision++;
       await Promise.all([
+        room.state.storage.put("roomRevision", room.roomRevision),
         room.state.storage.put("sourceRevision", room.sourceRevision),
         stalePublications.length
           ? room.state.storage.put("publishedSources", [
@@ -411,6 +580,19 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     case MEDIA_CONTROL_MESSAGE_TYPES.RESUME:
       room.sendTopology(ws, { resumed: true });
       break;
+    case MEDIA_CONTROL_MESSAGE_TYPES.LEAVE: {
+      await handleLeave(room, ws, session, data);
+      break;
+    }
+    case MEDIA_CONTROL_MESSAGE_TYPES.REQUEST_SNAPSHOT: {
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.STATE_NACK, {
+        topology: room.buildTopologySnapshot(),
+        roomRevision: room.roomRevision.toString(),
+        epoch: room.epoch,
+        sourceRevision: room.sourceRevision,
+      });
+      break;
+    }
     default:
       room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
         error: `Unknown message type: ${type}`,
@@ -593,14 +775,25 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     peerId: session.peerId,
     ws,
     sources: new Set(resumedParticipant?.sources || []),
+    sourceStates: resumedParticipant?.sourceStates || {},
     providerCapabilities: new Set(session.providerCapabilities),
     muted: session.muted,
     deafened: session.deafened,
     joinedAt: resumedParticipant?.joinedAt || now,
+    lastSeenAt: now,
+    status: "connected",
     disconnectedAt: null,
     mediaCapabilities: session.mediaCapabilities,
     capabilityProtocol: session.capabilityProtocol,
+    connectionEpoch:
+      Number(data.connectionEpoch) ||
+      (resumedParticipant?.connectionEpoch || 0) + 1 ||
+      1,
   });
+  if (!resumedParticipant) {
+    room.roomRevision++;
+    void room.state.storage.put("roomRevision", room.roomRevision);
+  }
   await room.refreshPendingRouteSourceRevision?.();
   const participants = [...room.participants.values()]
     .filter((participant) => participant.peerId !== session.peerId)
@@ -682,6 +875,34 @@ function matchesProviderIdentity(route, data) {
   if (!route || data?.provider !== route.provider) return false;
   if (route.providerId) return data.providerId === route.providerId;
   return !data.providerId || data.providerId === null;
+}
+
+async function handleLeave(room, ws, session, data) {
+  const participantKey = `${session.userId}:${session.deviceId}`;
+  const participant = room.participants.get(participantKey);
+  room.leavePending.delete(participantKey);
+  if (participant && participant.ws === ws) {
+    room.participants.delete(participantKey);
+    room.roomRevision++;
+    void room.state.storage.put("roomRevision", room.roomRevision);
+    if (typeof room.finalizeParticipantDisconnect === "function") {
+      await room.finalizeParticipantDisconnect(session.peerId);
+    } else {
+      for (const [key, current] of room.publishedSources)
+        if (current.peerId === session.peerId)
+          room.publishedSources.delete(key);
+      await room.refreshPendingRouteSourceRevision?.();
+    }
+  }
+  room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
+    operationId: data.operationId,
+    accepted: true,
+    roomRevision: room.roomRevision.toString(),
+    canonicalState: room.buildTopologySnapshot
+      ? room.buildTopologySnapshot()
+      : undefined,
+  });
+  ws.close(4000, "leave-acknowledged");
 }
 
 async function handleCloudflarePublication(room, ws, session, data) {
