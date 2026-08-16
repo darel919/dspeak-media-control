@@ -142,7 +142,12 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     );
     return;
   }
-  const expectedRoomRevision = String(data.expectedRoomRevision);
+  const hasExpectedRoomRevision =
+    typeof data.expectedRoomRevision === "string" &&
+    data.expectedRoomRevision.length > 0;
+  const expectedRoomRevision = hasExpectedRoomRevision
+    ? data.expectedRoomRevision
+    : null;
   const isParticipantLocalMutation =
     type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY ||
@@ -150,7 +155,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
   if (
     isMutation &&
     !isParticipantLocalMutation &&
-    expectedRoomRevision &&
+    hasExpectedRoomRevision &&
     expectedRoomRevision !== room.roomRevision.toString()
   ) {
     const nackPayload = {
@@ -229,6 +234,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           roomRevision: room.roomRevision.toString(),
           epoch: room.epoch,
           sourceRevision: room.sourceRevision,
+          connectionEpoch:
+            room.participantConnectionEpochs?.get(
+              `${session.userId}:${session.deviceId}`,
+            ) || 1,
         });
         // Also send HEARTBEAT_ACK so the client updates its liveness state
         room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT_ACK, {
@@ -237,6 +246,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           roomRevision: room.roomRevision.toString(),
           epoch: room.epoch,
           sourceRevision: room.sourceRevision,
+          connectionEpoch:
+            room.participantConnectionEpochs?.get(
+              `${session.userId}:${session.deviceId}`,
+            ) || 1,
           publishedSourcesDigest: [...room.publishedSources.values()].map(
             (publication) => ({
               source: publication.source,
@@ -253,6 +266,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         roomRevision: room.roomRevision.toString(),
         epoch: room.epoch,
         sourceRevision: room.sourceRevision,
+        connectionEpoch:
+          room.participantConnectionEpochs?.get(
+            `${session.userId}:${session.deviceId}`,
+          ) || 1,
         publishedSourcesDigest: [...room.publishedSources.values()].map(
           (publication) => ({
             source: publication.source,
@@ -923,6 +940,8 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     roomRevision: room.roomRevision.toString(),
     epoch: room.epoch,
     sourceRevision: room.sourceRevision,
+    connectionEpoch:
+      room.participantConnectionEpochs?.get(participantKey) || 1,
   });
   broadcastParticipantCapabilities(
     room,

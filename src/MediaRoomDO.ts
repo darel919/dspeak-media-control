@@ -310,6 +310,7 @@ export class MediaRoomDO {
       providerHealth,
       qualificationFallbackRoute,
       qualificationParticipantSignature,
+      participantConnectionEpochs,
     ] = await Promise.all([
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
@@ -453,9 +454,13 @@ export class MediaRoomDO {
       const participantKey = `${restored.userId}:${restored.deviceId}`;
       const previousParticipant = this.participants.get(participantKey);
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
-        const connectionEpoch =
-          (this.participantConnectionEpochs?.get(participantKey) || 0) + 1;
-        this.participantConnectionEpochs.set(participantKey, connectionEpoch);
+        // Hibernation: preserve existing epoch, don't increment
+        // Only assign new epoch if this is a truly new session (no existing epoch)
+        let connectionEpoch = this.participantConnectionEpochs?.get(participantKey);
+        if (connectionEpoch === undefined) {
+          connectionEpoch = (this.participantConnectionEpochs?.get(participantKey) || 0) + 1;
+          this.participantConnectionEpochs.set(participantKey, connectionEpoch);
+        }
         this.participants.set(participantKey, {
           userId: restored.userId,
           deviceId: restored.deviceId,
