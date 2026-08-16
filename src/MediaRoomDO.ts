@@ -7,6 +7,7 @@ import {
   MEDIA_CONTROL_MESSAGE_TYPES,
   MEDIA_CONTROL_PROTOCOL_VERSION,
   MEDIA_CONTROL_SERVER_HELLO,
+  MEDIA_OPERATION_ACK_TIMEOUT_MS,
   MEDIA_ROUTE_KIND,
   OPERATION_ID,
   ROOM_REVISION,
@@ -84,6 +85,7 @@ export class MediaRoomDO {
     this.operationResults = new Map();
     this.maxOperationHistory = 1000;
     this.leavePending = new Set();
+    this.participantConnectionEpochs = new Map();
   }
 
   async fetch(request) {
@@ -322,6 +324,7 @@ export class MediaRoomDO {
       this.state.storage.get("providerHealth"),
       this.state.storage.get("qualificationFallbackRoute"),
       this.state.storage.get("qualificationParticipantSignature"),
+      this.state.storage.get("participantConnectionEpochs"),
     ]);
     if (route) this.route = route;
     if (Number.isSafeInteger(epoch)) this.epoch = epoch;
@@ -355,6 +358,19 @@ export class MediaRoomDO {
     if (typeof qualificationParticipantSignature === "string")
       this.qualificationParticipantSignature =
         qualificationParticipantSignature;
+    if (
+      participantConnectionEpochs &&
+      typeof participantConnectionEpochs === "object"
+    ) {
+      this.participantConnectionEpochs = new Map(
+        Object.entries(participantConnectionEpochs).map(([key, value]) => [
+          key,
+          Number(value),
+        ]),
+      );
+    } else {
+      this.participantConnectionEpochs = new Map();
+    }
     const hasPersistedRoomState = Boolean(
       route ||
       (Number.isSafeInteger(epoch) && epoch > 0) ||
@@ -409,7 +425,23 @@ export class MediaRoomDO {
       this.state.storage.delete("providerConfig"),
       this.state.storage.delete("qualificationFallbackRoute"),
       this.state.storage.delete("qualificationParticipantSignature"),
+      this.state.storage.put(
+        "participantConnectionEpochs",
+        Object.fromEntries(this.participantConnectionEpochs),
+      ),
     ]);
+    this.cleanupOperationResults();
+  }
+
+  cleanupOperationResults() {
+    const maxSize = 1000;
+    if (this.operationResults.size > maxSize) {
+      const entriesToDelete = this.operationResults.size - maxSize;
+      const keys = [...this.operationResults.keys()].slice(0, entriesToDelete);
+      for (const key of keys) {
+        this.operationResults.delete(key);
+      }
+    }
   }
 
   getSession(ws) {
@@ -421,9 +453,9 @@ export class MediaRoomDO {
       const participantKey = `${restored.userId}:${restored.deviceId}`;
       const previousParticipant = this.participants.get(participantKey);
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
-        const connectionEpoch = previousParticipant?.connectionEpoch
-          ? previousParticipant.connectionEpoch + 1
-          : 1;
+        const connectionEpoch =
+          (this.participantConnectionEpochs?.get(participantKey) || 0) + 1;
+        this.participantConnectionEpochs.set(participantKey, connectionEpoch);
         this.participants.set(participantKey, {
           userId: restored.userId,
           deviceId: restored.deviceId,
@@ -811,6 +843,7 @@ export class MediaRoomDO {
 
   buildTopologySnapshot() {
     const pending = this.pendingRoute;
+    const participantList = this.getParticipantList();
     return {
       route: this.route,
       mode: pending
@@ -822,11 +855,11 @@ export class MediaRoomDO {
               ? "probing"
               : "p2p"
             : "sfu",
-      epoch: pending?.epoch || this.epoch,
-      sourceRevision: this.sourceRevision,
+      epoch: String(pending?.epoch || this.epoch),
+      sourceRevision: String(this.sourceRevision),
       roomRevision: this.roomRevision.toString(),
-      participants: this.getParticipantList(),
-      peers: this.getParticipantList(),
+      participants: participantList,
+      peers: participantList,
       provider: pending?.provider || this.route.provider,
       providerId: pending?.providerId || this.route.providerId,
       reason: pending?.reason || this.route.reason,
@@ -835,7 +868,38 @@ export class MediaRoomDO {
       targetProviderId: pending?.providerId,
       targetRoute: pending,
       publishedSources: [...this.publishedSources.values()],
+      sourceStates: Object.fromEntries(
+        [...this.participants.values()].map((p) => [
+          `${p.userId}:${p.deviceId}`,
+          p.sourceStates || {},
+        ]),
+      ),
     };
+  }
+
+  applyCanonicalSnapshot(
+    ws,
+    operationId,
+    accepted,
+    code,
+    retryable,
+    extra = {},
+  ) {
+    const snapshot = this.buildTopologySnapshot();
+    const payload = {
+      operationId,
+      accepted,
+      roomRevision: this.roomRevision.toString(),
+      connectionEpoch: extra.connectionEpoch,
+      canonicalState: snapshot,
+      ...extra,
+    };
+    if (code) {
+      payload.code = code;
+      payload.retryable = retryable;
+    }
+    this.operationResults.set(operationId, payload);
+    this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, payload);
   }
 
   getConnectionMode() {

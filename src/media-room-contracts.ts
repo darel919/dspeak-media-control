@@ -174,8 +174,14 @@ export function mediaPublicationKey(publication) {
   const logicalStreamId = String(
     publication?.logicalStreamId || publication?.source || "",
   );
+  const connectionEpoch = publication?.connectionEpoch
+    ? String(publication.connectionEpoch)
+    : "";
+  const generation = publication?.generation
+    ? String(publication.generation)
+    : "";
   if (!publication?.variantId)
-    return `${peerId}:${publication?.source || logicalStreamId}`;
+    return `${peerId}:${publication?.source || logicalStreamId}:${connectionEpoch}:${generation}`;
   const variantId = String(publication.variantId);
-  return `${peerId}:${logicalStreamId}:${variantId}`;
+  return `${peerId}:${logicalStreamId}:${variantId}:${connectionEpoch}:${generation}`;
 }

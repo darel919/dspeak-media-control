@@ -314,6 +314,7 @@ export function commitRoute(room, route) {
         providerId: route.providerId,
         epoch: route.epoch,
         sourceRevision: route.sourceRevision,
+        roomRevision: room.roomRevision.toString(),
         participants: room.getParticipantList(),
         peers: room.getParticipantList(),
       });
