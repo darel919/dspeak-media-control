@@ -1509,10 +1509,13 @@ test("Cloudflare publications retain safe screen audio ownership", async () => {
 
   assert.equal(recipientMessages[0].data.ownerSource, "screen");
   assert.equal(recipientMessages[1].data.ownerSource, "system-audio");
-  assert.equal(
-    instance.publishedSources.get("peer-1:screen-audio").ownerSource,
-    "system-audio",
+  const stored = [...instance.publishedSources.values()].find(
+    (publication) =>
+      publication.peerId === "peer-1" &&
+      publication.source === "screen-audio" &&
+      publication.trackName === "track-system",
   );
+  assert.equal(stored?.ownerSource, "system-audio");
 });
 
 test("Cloudflare codec migration acknowledgements return to the publication owner", async () => {

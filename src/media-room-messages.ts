@@ -861,6 +861,24 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   session.routeEpoch = claims.routeEpoch || 0;
   const participantKey = `${claims.sub}:${claims.deviceId}`;
   const resumedParticipant = room.participants.get(participantKey);
+  const isSameWebSocketResume =
+    resumedParticipant?.ws === ws || session.connectionEpoch != null;
+  let connectionEpoch;
+  if (isSameWebSocketResume) {
+    connectionEpoch =
+      room.participantConnectionEpochs?.get(participantKey) ||
+      session.connectionEpoch ||
+      1;
+  } else {
+    connectionEpoch =
+      (room.participantConnectionEpochs?.get(participantKey) || 0) + 1;
+    room.participantConnectionEpochs.set(participantKey, connectionEpoch);
+    void room.state.storage.put(
+      "participantConnectionEpochs",
+      Object.fromEntries(room.participantConnectionEpochs),
+    );
+  }
+  session.connectionEpoch = connectionEpoch;
   const hasVideo = [...room.participants.values()].some((participant) =>
     [...(participant.sources || [])].some((source) =>
       isVideoMediaSource(source),
@@ -921,8 +939,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     disconnectedAt: null,
     mediaCapabilities: session.mediaCapabilities,
     capabilityProtocol: session.capabilityProtocol,
-    connectionEpoch:
-      (room.participantConnectionEpochs?.get(participantKey) || 0) + 1,
+    connectionEpoch,
   });
   if (!resumedParticipant) {
     room.roomRevision++;
@@ -940,8 +957,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     roomRevision: room.roomRevision.toString(),
     epoch: room.epoch,
     sourceRevision: room.sourceRevision,
-    connectionEpoch:
-      room.participantConnectionEpochs?.get(participantKey) || 1,
+    connectionEpoch,
   });
   broadcastParticipantCapabilities(
     room,

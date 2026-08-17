@@ -83,9 +83,10 @@ export class MediaRoomDO {
     this.stateLoaded = false;
     this.operationHistory = new Set();
     this.operationResults = new Map();
-    this.maxOperationHistory = 1000;
-    this.leavePending = new Set();
-    this.participantConnectionEpochs = new Map();
+      this.maxOperationHistory = 1000;
+      this.operationResultsTTL = 5 * 60 * 1000;
+      this.leavePending = new Set();
+      this.participantConnectionEpochs = new Map();
   }
 
   async fetch(request) {
@@ -436,10 +437,16 @@ export class MediaRoomDO {
 
   cleanupOperationResults() {
     const maxSize = 1000;
+    const now = Date.now();
     if (this.operationResults.size > maxSize) {
       const entriesToDelete = this.operationResults.size - maxSize;
       const keys = [...this.operationResults.keys()].slice(0, entriesToDelete);
       for (const key of keys) {
+        this.operationResults.delete(key);
+      }
+    }
+    for (const [key, value] of this.operationResults.entries()) {
+      if (value.createdAt && now - value.createdAt > this.operationResultsTTL) {
         this.operationResults.delete(key);
       }
     }
