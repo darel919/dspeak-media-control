@@ -265,8 +265,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             room.participantConnectionEpochs?.get(
               `${session.userId}:${session.deviceId}`,
             ) || 1,
-          publishedSourcesDigest: [...room.publishedSources.values()].map(
-            (publication) => ({
+          publishedSourcesDigest: [...room.publishedSources.values()]
+            .filter((publication) => publication.peerId !== session.peerId)
+            .map((publication) => ({
               source: publication.source,
               peerId: publication.peerId,
               generation: publication.generation,
@@ -275,8 +276,20 @@ export async function handleRoomMessage(room, ws, session, envelope) {
               sessionId: publication.sessionId,
               ownerSource: publication.ownerSource ?? null,
               variantId: publication.variantId ?? null,
-            }),
-          ),
+              logicalStreamId: publication.logicalStreamId ?? null,
+              codec: publication.codec ?? null,
+              codecAcceleration: publication.codecAcceleration ?? null,
+              codecImplementation: publication.codecImplementation ?? null,
+              width: publication.width ?? null,
+              height: publication.height ?? null,
+              fps: publication.fps ?? null,
+              bitrate: publication.bitrate ?? null,
+              target: publication.target ?? null,
+              targetAdjusted: publication.targetAdjusted ?? null,
+              receivers: publication.receivers ?? [],
+              emergency: publication.emergency ?? false,
+              score: publication.score ?? null,
+            })),
         });
         break;
       }
@@ -290,18 +303,31 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           room.participantConnectionEpochs?.get(
             `${session.userId}:${session.deviceId}`,
           ) || 1,
-        publishedSourcesDigest: [...room.publishedSources.values()].map(
-          (publication) => ({
-            source: publication.source,
-            peerId: publication.peerId,
-            generation: publication.generation,
-            trackName: publication.trackName,
-            connectionEpoch: publication.connectionEpoch,
-            sessionId: publication.sessionId,
-            ownerSource: publication.ownerSource ?? null,
-            variantId: publication.variantId ?? null,
-          }),
-        ),
+        publishedSourcesDigest: [...room.publishedSources.values()]
+            .filter((publication) => publication.peerId !== session.peerId)
+            .map((publication) => ({
+              source: publication.source,
+              peerId: publication.peerId,
+              generation: publication.generation,
+              trackName: publication.trackName,
+              connectionEpoch: publication.connectionEpoch,
+              sessionId: publication.sessionId,
+              ownerSource: publication.ownerSource ?? null,
+              variantId: publication.variantId ?? null,
+              logicalStreamId: publication.logicalStreamId ?? null,
+              codec: publication.codec ?? null,
+              codecAcceleration: publication.codecAcceleration ?? null,
+              codecImplementation: publication.codecImplementation ?? null,
+              width: publication.width ?? null,
+              height: publication.height ?? null,
+              fps: publication.fps ?? null,
+              bitrate: publication.bitrate ?? null,
+              target: publication.target ?? null,
+              targetAdjusted: publication.targetAdjusted ?? null,
+              receivers: publication.receivers ?? [],
+              emergency: publication.emergency ?? false,
+              score: publication.score ?? null,
+            })),
       });
       break;
     }
@@ -431,196 +457,236 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       relayCodecMigrationState(room, ws, session, data);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
-      const participant = room.participants.get(
-        `${session.userId}:${session.deviceId}`,
-      );
-      if (!participant) break;
-      const sources = normalizeMediaSources(data.sources);
-      if (!sources) {
-        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
-          code: "INVALID_MEDIA_SOURCES",
-          error: "Media source identifiers are invalid",
-        });
-        break;
-      }
-      const hasVideo = [...room.participants.values()].some((candidate) =>
-        [
-          ...(candidate === participant ? sources : candidate.sources || []),
-        ].some((source) => isVideoMediaSource(source)),
-      );
-      const participantLimit = getMediaChannelParticipantLimit(
-        session.connectionMode,
-        hasVideo,
-      );
-      if (room.participants.size > participantLimit) {
-        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
-          code: "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
-          error: `This media channel supports up to ${participantLimit} participants for the active media mode`,
-        });
-        break;
-      }
-      const stalePublications = [];
-      const sourceSet = new Set(sources);
-      const previousSources = participant.sources || new Set();
-      const sourcesChanged =
-        previousSources.size !== sourceSet.size ||
-        [...previousSources].some((source) => !sourceSet.has(source));
-      for (const [key, publication] of room.publishedSources) {
-        if (
-          publication.peerId === session.peerId &&
-          !sourceSet.has(publication.source)
-        ) {
-          room.publishedSources.delete(key);
-          stalePublications.push({ ...publication, closed: true });
-        }
-      }
-      participant.sources = new Set(sources);
-      session.sources = [...participant.sources];
-      ws.serializeAttachment(session);
-      if (!participant.sourceStates) participant.sourceStates = {};
-      const nowFs = Date.now();
-      const clientSourceStates = data.sourceStates || {};
+          const participant = room.participants.get(
+            `${session.userId}:${session.deviceId}`,
+          );
+          if (!participant) break;
+          const sources = normalizeMediaSources(data.sources);
+          if (!sources) {
+            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+              code: "INVALID_MEDIA_SOURCES",
+              error: "Media source identifiers are invalid",
+            });
+            break;
+          }
+          const hasVideo = [...room.participants.values()].some((candidate) => {
+            const candidateSources =
+              candidate === participant ? sources : candidate.sources || [];
+            return candidateSources.some((source) => isVideoMediaSource(source));
+          });
+          const participantLimit = getMediaChannelParticipantLimit(
+            session.connectionMode,
+            hasVideo,
+          );
+          if (room.participants.size > participantLimit) {
+            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+              code: "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+              error: `This media channel supports up to ${participantLimit} participants for the active media mode`,
+            });
+            break;
+          }
 
-      // Save previous states for comparison
-      const previousStates = new Map();
-      for (const source of [...participant.sources, ...sourceSet]) {
-        previousStates.set(source, participant.sourceStates[source] || {
-          generation: 0,
-          desiredState: "inactive",
-          publicationState: "unpublished",
-          provider: null,
-        });
-      }
+          const operationId = data.operationId;
+          if (!operationId || typeof operationId !== "string") {
+            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+              code: "MISSING_OPERATION_ID",
+              error: "MEDIA_SOURCES mutation requires operationId",
+            });
+            break;
+          }
+          if (room.operationHistory.has(operationId)) {
+            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
+              operationId,
+              accepted: false,
+              code: "DUPLICATE_OPERATION",
+              retryable: false,
+            });
+            break;
+          }
 
-      for (const source of sourceSet) {
-        const clientState = clientSourceStates[source];
-        const previousState = previousStates.get(source);
-        const isAudioSource = source === "audio";
-        // Source existence and mute/transmission are separate concepts.
-        // Audio source desiredState is "active" whenever the source exists in sources.
-        // Mute controls producer pause/transmission, not canonical source existence.
-        const desired = participant.sources.has(source) ? "active" : "inactive";
-        const clientGeneration = Number.isSafeInteger(clientState?.generation)
-          ? clientState.generation
-          : previousState.generation;
-        const isStale = clientGeneration < previousState.generation;
-        if (isStale) {
-          const canonicalState = room.buildTopologySnapshot
-            ? room.buildTopologySnapshot()
-            : undefined;
-          const nackPayload = {
+          // ============================================================
+          // VALIDATE-THEN-COMMIT: build all next state in temp structures
+          // ============================================================
+          const sourceSet = new Set(sources);
+          const previousSources = new Set(participant.sources || new Set());
+          const clientSourceStates = data.sourceStates || {};
+
+          // Snapshot previous state BEFORE any mutation
+          const allSources = new Set([...previousSources, ...sourceSet]);
+          const previousStates = new Map();
+          for (const source of allSources) {
+            previousStates.set(
+              source,
+              structuredClone(
+                participant.sourceStates?.[source] ?? {
+                  generation: 0,
+                  desiredState: "inactive",
+                  publicationState: "unpublished",
+                  provider: null,
+                },
+              ),
+            );
+          }
+
+          // 1. Validate source identifiers (already done by normalizeMediaSources)
+
+          // 2. Validate participant limits (done above)
+
+          // 3. Validate every generation
+          for (const source of sourceSet) {
+            const clientState = clientSourceStates[source];
+            const previousState = previousStates.get(source);
+            const clientGeneration = Number.isSafeInteger(clientState?.generation)
+              ? clientState.generation
+              : previousState.generation;
+            const isStale = clientGeneration < previousState.generation;
+            if (isStale) {
+              const canonicalState = room.buildTopologySnapshot
+                ? room.buildTopologySnapshot()
+                : undefined;
+              const nackPayload = {
+                operationId,
+                accepted: false,
+                code: "STALE_SOURCE_GENERATION",
+                retryable: false,
+                adoptsCanonicalGeneration: true,
+                roomRevision: String(room.roomRevision),
+                source,
+                expectedGeneration: previousState.generation,
+                receivedGeneration: clientGeneration,
+                canonicalState,
+              };
+              room.storeOperationResult(
+                operationCacheKey(session, operationId),
+                nackPayload,
+              );
+              room.sendMessage(
+                ws,
+                MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+                nackPayload,
+              );
+              return;
+            }
+          }
+
+          // 4. Validate epoch (control epoch is implicit in session)
+
+          // 5. Calculate complete next state
+          const nextSources = new Set(sourceSet);
+          const nextSourceStates = {};
+          const nowFs = Date.now();
+          for (const source of allSources) {
+            const previousState = previousStates.get(source);
+            const inNewSet = sourceSet.has(source);
+            const desired = inNewSet ? "active" : "inactive";
+            const clientState = clientSourceStates[source];
+            const clientGeneration = Number.isSafeInteger(clientState?.generation)
+              ? clientState.generation
+              : previousState.generation;
+            const newPublicationState = inNewSet
+              ? previousState.publicationState === "published"
+                ? "published"
+                : "announced"
+              : "unpublished";
+            nextSourceStates[source] = {
+              ...previousState,
+              desiredState: desired,
+              generation: clientGeneration,
+              publicationState: newPublicationState,
+              provider: previousState.provider,
+              updatedAt: nowFs,
+            };
+          }
+
+          // Compute publications to retire
+          const publicationsToRetire = [];
+          for (const [key, publication] of room.publishedSources) {
+            if (
+              publication.peerId === session.peerId &&
+              !sourceSet.has(publication.source)
+            ) {
+              publicationsToRetire.push({ ...publication, closed: true });
+            }
+          }
+
+          // 6. Commit atomically
+          room.operationHistory.add(operationId);
+          if (room.operationHistory.size > room.maxOperationHistory) {
+            const firstKey = room.operationHistory.keys().next().value;
+            if (firstKey !== undefined) room.operationHistory.delete(firstKey);
+          }
+
+          participant.sources = nextSources;
+          session.sources = [...nextSources];
+          participant.sourceStates = nextSourceStates;
+          for (const retired of publicationsToRetire) {
+            room.publishedSources.delete(`${retired.peerId}:${retired.source}`);
+          }
+          ws.serializeAttachment(session);
+
+          // Compute sourceStateChanged for revision bump
+          const sourceStateChanged = [...previousStates.keys()].some((source) => {
+            const prev = previousStates.get(source);
+            const curr = nextSourceStates[source];
+            if (!prev && !curr) return false;
+            if (!prev || !curr) return true;
+            return (
+              prev.generation !== curr.generation ||
+              prev.desiredState !== curr.desiredState ||
+              prev.publicationState !== curr.publicationState ||
+              prev.provider !== curr.provider
+            );
+          });
+
+          if (
+            previousSources.size !== nextSources.size ||
+            [...previousSources].some((s) => !nextSources.has(s)) ||
+            publicationsToRetire.length > 0 ||
+            sourceStateChanged
+          ) {
+            room.roomRevision++;
+            room.sourceRevision++;
+            await Promise.all([
+              room.state.storage.put("roomRevision", room.roomRevision),
+              room.state.storage.put("sourceRevision", room.sourceRevision),
+              publicationsToRetire.length
+                ? room.state.storage.put("publishedSources", [
+                    ...room.publishedSources.values(),
+                  ])
+                : Promise.resolve(),
+            ]);
+          }
+
+          const ackPayload = {
             operationId,
-            accepted: false,
-            code: "STALE_SOURCE_GENERATION",
-            retryable: false,
-            // Not blindly retryable: client adopts canonical generation and
-            // reconciles latest desired state with a new fenced operation.
-            adoptsCanonicalGeneration: true,
-            roomRevision: String(room.roomRevision),
-            source: source,
-            expectedGeneration: previousState.generation,
-            receivedGeneration: clientGeneration,
-            canonicalState: canonicalState,
+            accepted: true,
+            roomRevision: room.roomRevision.toString(),
+            canonicalState: room.buildTopologySnapshot
+              ? room.buildTopologySnapshot()
+              : undefined,
           };
           room.storeOperationResult(
             operationCacheKey(session, operationId),
-            nackPayload,
+            ackPayload,
           );
           room.sendMessage(
             ws,
             MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
-            nackPayload,
+            ackPayload,
           );
-          return;
+          for (const publication of publicationsToRetire)
+            for (const recipient of room.participants.values())
+              if (recipient.ws && recipient.ws !== ws)
+                room.sendMessage(
+                  recipient.ws,
+                  MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+                  publication,
+                );
+          await room.refreshPendingRouteSourceRevision?.();
+          room.maybeStartQualification();
+          room.broadcastTopology();
+          break;
         }
-        const newPublicationState = sourceSet.has(source)
-          ? previousState.publicationState === "published"
-            ? "published"
-            : "announced"
-          : "unpublished";
-        participant.sourceStates[source] = {
-          ...previousState,
-          desiredState: desired,
-          generation: clientGeneration,
-          publicationState: newPublicationState,
-          provider: previousState.provider,
-          updatedAt: nowFs,
-        };
-      }
-      for (const previousSource of previousSources) {
-        if (!sourceSet.has(previousSource)) {
-          const prev = previousStates.get(previousSource) || {
-            generation: 0,
-            desiredState: "inactive",
-            publicationState: "unpublished",
-            provider: null,
-          };
-          participant.sourceStates[previousSource] = {
-            generation: prev.generation + 1,
-            desiredState: "inactive",
-            publicationState: "unpublished",
-            provider: null,
-            updatedAt: nowFs,
-          };
-        }
-      }
-      // Compute sourceStateChanged: compare generation, desiredState, publicationState, provider
-      const sourceStateChanged = [...previousStates.keys()].some((source) => {
-        const prev = previousStates.get(source);
-        const curr = participant.sourceStates[source];
-        if (!prev && !curr) return false;
-        if (!prev || !curr) return true;
-        return (
-          prev.generation !== curr.generation ||
-          prev.desiredState !== curr.desiredState ||
-          prev.publicationState !== curr.publicationState ||
-          prev.provider !== curr.provider
-        );
-      });
-      // Increment revisions BEFORE sending ACK (post-commit revision)
-      if (sourcesChanged || stalePublications.length > 0 || sourceStateChanged) {
-        room.roomRevision++;
-        room.sourceRevision++;
-        await Promise.all([
-          room.state.storage.put("roomRevision", room.roomRevision),
-          room.state.storage.put("sourceRevision", room.sourceRevision),
-          stalePublications.length
-            ? room.state.storage.put("publishedSources", [
-                ...room.publishedSources.values(),
-              ])
-            : Promise.resolve(),
-        ]);
-      }
-      const ackPayload = {
-        operationId,
-        accepted: true,
-        roomRevision: room.roomRevision.toString(),
-        canonicalState: room.buildTopologySnapshot
-          ? room.buildTopologySnapshot()
-          : undefined,
-      };
-      room.storeOperationResult(
-        operationCacheKey(session, operationId),
-        ackPayload,
-      );
-      room.sendMessage(
-        ws,
-        MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
-        ackPayload,
-      );
-      for (const publication of stalePublications)
-        for (const recipient of room.participants.values())
-          if (recipient.ws && recipient.ws !== ws)
-            room.sendMessage(
-              recipient.ws,
-              MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-              publication,
-            );
-      await room.refreshPendingRouteSourceRevision?.();
-      room.maybeStartQualification();
-      room.broadcastTopology();
-      break;
-    }
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED:
       if (
         Number(data.epoch) !== room.epoch ||
@@ -943,6 +1009,16 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     );
   }
   session.connectionEpoch = connectionEpoch;
+
+  // Preserve Cloudflare session ID across control-plane reconnects.
+  // The client preserves the Cloudflare PeerConnection and re-announces
+  // publications with the new connectionEpoch. We must retain the
+  // provider-session identity so the server accepts those re-announces.
+  const preservedCloudflareSessionId = resumedParticipant?.cloudflareSessionId;
+  if (preservedCloudflareSessionId) {
+    session.cloudflareSessionId = preservedCloudflareSessionId;
+  }
+
   const hasVideo = [...room.participants.values()].some((participant) =>
     [...(participant.sources || [])].some((source) =>
       isVideoMediaSource(source),
@@ -1004,6 +1080,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     mediaCapabilities: session.mediaCapabilities,
     capabilityProtocol: session.capabilityProtocol,
     connectionEpoch,
+    cloudflareSessionId: session.cloudflareSessionId,
   });
   if (!resumedParticipant) {
     room.roomRevision++;

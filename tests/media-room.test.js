@@ -131,10 +131,14 @@ test("duplicate media source announcements do not churn the source revision", as
 
   const message = {
     type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
-    data: { sources: ["audio", "camera"] },
+    data: { sources: ["audio", "camera"], operationId: "op-sources-1" },
   };
   await handleRoomMessage(instance, ws, session, message);
-  await handleRoomMessage(instance, ws, session, message);
+  const message2 = {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+    data: { sources: ["audio", "camera"], operationId: "op-sources-2" },
+  };
+  await handleRoomMessage(instance, ws, session, message2);
 
   assert.equal(instance.sourceRevision, 1);
   assert.deepEqual(session.sources, ["audio", "camera"]);
