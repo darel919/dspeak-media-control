@@ -71,6 +71,7 @@ export class MediaRoomDO {
     this.qoeMetrics = new Map();
     this.providerConfig = null;
     this.sourceRevision = 0;
+    this.publicationRevision = 0;
     this.epoch = 0;
     this.roomRevision = 0n;
     this.transitionGeneration = 0;
@@ -300,8 +301,9 @@ export class MediaRoomDO {
     const [
       route,
       epoch,
-      sourceRevision,
-      roomRevision,
+          sourceRevision,
+          publicationRevision,
+          roomRevision,
       pendingRoute,
       pendingStartedAt,
       publishedSources,
@@ -317,6 +319,7 @@ export class MediaRoomDO {
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
       this.state.storage.get("sourceRevision"),
+      this.state.storage.get("publicationRevision"),
       this.state.storage.get("roomRevision"),
       this.state.storage.get("pendingRoute"),
       this.state.storage.get("pendingStartedAt"),
@@ -334,6 +337,8 @@ export class MediaRoomDO {
     if (Number.isSafeInteger(epoch)) this.epoch = epoch;
     if (Number.isSafeInteger(sourceRevision))
       this.sourceRevision = sourceRevision;
+    if (Number.isSafeInteger(publicationRevision))
+      this.publicationRevision = publicationRevision;
     if (typeof roomRevision === "bigint" || typeof roomRevision === "number")
       this.roomRevision = BigInt(roomRevision);
     if (pendingRoute) this.pendingRoute = pendingRoute;

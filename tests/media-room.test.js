@@ -244,6 +244,7 @@ test("Cloudflare codec variants coexist under one logical publication", async ()
   const session = {
     authenticated: true,
     cloudflareSessionId: "cloudflare-session",
+    connectionEpoch: 5,
     deviceId: "device-1",
     userId: "user-1",
     peerId: "peer-1",
@@ -253,6 +254,15 @@ test("Cloudflare codec variants coexist under one logical publication", async ()
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 5,
+    sources: new Set(["camera"]),
+    sourceStates: {
+      camera: {
+        generation: 1,
+        desiredState: "active",
+        publicationState: "unpublished",
+      },
+    },
     ws: sender,
   });
   instance.isCurrentParticipantSession = () => true;
@@ -265,6 +275,8 @@ test("Cloudflare codec variants coexist under one logical publication", async ()
         logicalStreamId: "user:user-1/camera",
         variantId,
         codec,
+        generation: 1,
+        connectionEpoch: 5,
         ...metadata,
       },
     });
@@ -306,6 +318,8 @@ test("Cloudflare codec variants coexist under one logical publication", async ()
       logicalStreamId: "user:user-1/camera",
       variantId: "user:user-1/camera:h264",
       codec: "H264",
+      generation: 1,
+      connectionEpoch: 5,
       width: 1280,
       height: 720,
       fps: 30,
@@ -1472,6 +1486,7 @@ test("Cloudflare publications retain safe screen audio ownership", async () => {
   const session = {
     authenticated: true,
     cloudflareSessionId: "cloudflare-session",
+    connectionEpoch: 5,
     deviceId: "device-1",
     userId: "user-1",
     peerId: "peer-1",
@@ -1481,6 +1496,15 @@ test("Cloudflare publications retain safe screen audio ownership", async () => {
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 5,
+    sources: new Set(["screen-audio"]),
+    sourceStates: {
+      "screen-audio": {
+        generation: 1,
+        desiredState: "active",
+        publicationState: "unpublished",
+      },
+    },
     ws: sender,
   });
   instance.participants.set("user-2:device-2", {
@@ -1496,6 +1520,8 @@ test("Cloudflare publications retain safe screen audio ownership", async () => {
     data: {
       trackName: "track-paired",
       source: "screen-audio",
+      generation: 1,
+      connectionEpoch: 5,
     },
   });
   await handleRoomMessage(instance, sender, session, {
@@ -1504,6 +1530,8 @@ test("Cloudflare publications retain safe screen audio ownership", async () => {
       trackName: "track-system",
       source: "screen-audio",
       ownerSource: "system-audio",
+      generation: 1,
+      connectionEpoch: 5,
     },
   });
 
@@ -1544,10 +1572,26 @@ test("Cloudflare codec migration acknowledgements return to the publication owne
   const publisherSession = {
     authenticated: true,
     cloudflareSessionId: "publisher-session",
+    connectionEpoch: 5,
     deviceId: "device-1",
     userId: "user-1",
     peerId: "peer-1",
   };
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    connectionEpoch: 5,
+    sources: new Set(["camera"]),
+    sourceStates: {
+      camera: {
+        generation: 2,
+        desiredState: "active",
+        publicationState: "unpublished",
+      },
+    },
+    ws: publisher,
+  });
   await handleRoomMessage(instance, publisher, publisherSession, {
     type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION,
     data: {
@@ -1556,6 +1600,7 @@ test("Cloudflare codec migration acknowledgements return to the publication owne
       logicalStreamId: "user:user-1/camera",
       variantId: "user:user-1/camera:h264",
       generation: 2,
+      connectionEpoch: 5,
       codec: "H264",
       receivers: ["peer-2"],
     },

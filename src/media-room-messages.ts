@@ -118,10 +118,6 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     }
   }
   const participantKey = `${session.userId}:${session.deviceId}`;
-  const operationCacheKey = (operationId) =>
-    operationId
-      ? `${participantKey}:${session.connectionEpoch ?? "?"}:${operationId}`
-      : null;
   const serverConnectionEpoch =
     room.participantConnectionEpochs?.get(participantKey) || 1;
   const clientEpoch = Number(data.connectionEpoch);
@@ -147,7 +143,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.storeOperationResult(operationCacheKey(operationId), nackPayload);
+    room.storeOperationResult(operationCacheKey(session, operationId), nackPayload);
     room.sendMessage(
       ws,
       MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -181,7 +177,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.storeOperationResult(operationCacheKey(operationId), nackPayload);
+    room.storeOperationResult(operationCacheKey(session, operationId), nackPayload);
     room.sendMessage(
       ws,
       MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -268,6 +264,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
               source: publication.source,
               peerId: publication.peerId,
               generation: publication.generation,
+              trackName: publication.trackName,
+              connectionEpoch: publication.connectionEpoch,
+              sessionId: publication.sessionId,
+              ownerSource: publication.ownerSource ?? null,
+              variantId: publication.variantId ?? null,
             }),
           ),
         });
@@ -288,6 +289,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             source: publication.source,
             peerId: publication.peerId,
             generation: publication.generation,
+            trackName: publication.trackName,
+            connectionEpoch: publication.connectionEpoch,
+            sessionId: publication.sessionId,
+            ownerSource: publication.ownerSource ?? null,
+            variantId: publication.variantId ?? null,
           }),
         ),
       });
@@ -357,7 +363,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(operationCacheKey(operationId), ackPayload);
+      room.storeOperationResult(operationCacheKey(session, operationId), ackPayload);
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -401,7 +407,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(operationCacheKey(operationId), ackPayload);
+      room.storeOperationResult(operationCacheKey(session, operationId), ackPayload);
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -499,7 +505,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             receivedGeneration: clientGeneration,
             canonicalState: canonicalState,
           };
-          room.storeOperationResult(operationCacheKey(operationId), nackPayload);
+          room.storeOperationResult(operationCacheKey(session, operationId), nackPayload);
           room.sendMessage(
             ws,
             MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -554,7 +560,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(operationCacheKey(operationId), ackPayload);
+      room.storeOperationResult(operationCacheKey(session, operationId), ackPayload);
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -800,6 +806,7 @@ function relayCodecMigrationState(room, ws, session, data) {
     return false;
   const publication = [...room.publishedSources.values()].find((candidate) => {
     if (
+      // The sender is a receiver; the publication belongs to another peer.
       candidate.peerId === session.peerId ||
       candidate.logicalStreamId !== logicalStreamId ||
       candidate.variantId !== variantId ||
@@ -1047,6 +1054,13 @@ function matchesProviderIdentity(route, data) {
   return !data.providerId || data.providerId === null;
 }
 
+function operationCacheKey(session, operationId) {
+  if (!operationId || !session) return null;
+  return `${session.userId}:${session.deviceId}:${
+    session.connectionEpoch ?? "?"
+  }:${operationId}`;
+}
+
 async function handleLeave(room, ws, session, data) {
   const participantKey = `${session.userId}:${session.deviceId}`;
   const participant = room.participants.get(participantKey);
@@ -1062,7 +1076,7 @@ async function handleLeave(room, ws, session, data) {
       ? room.buildTopologySnapshot()
       : undefined,
   };
-  room.storeOperationResult(operationCacheKey(data.operationId), ackPayload);
+  room.storeOperationResult(operationCacheKey(session, data.operationId), ackPayload);
   room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, ackPayload);
   ws.close(4000, "leave-acknowledged");
 }
@@ -1152,6 +1166,49 @@ async function handleCloudflarePublication(room, ws, session, data) {
     closed: data.closed === true,
   };
   const publicationKey = mediaPublicationKey(publication);
+  const participant = room.participants.get(
+    `${session.userId}:${session.deviceId}`,
+  );
+  const canonical = participant?.sourceStates?.[source];
+  // Provider callbacks are NOT authoritative. The canonical source state
+  // (participant desired state + generation + epoch) decides whether a
+  // publication is current. A stale provider completion must not resurrect
+  // a source the participant already stopped.
+  const clientEpoch = Number(publication.connectionEpoch);
+  // Server-owned epoch: prefer the participant record (set at attach),
+  // fall back to the session for restored/hibernated paths.
+  const serverEpoch = Number(
+    participant?.connectionEpoch ?? session.connectionEpoch,
+  );
+  const canonicalGeneration = Number(canonical?.generation || 0);
+  const publicationGeneration = Number(publication.generation || 0);
+  const epochMismatch =
+    Number.isSafeInteger(clientEpoch) &&
+    Number.isSafeInteger(serverEpoch) &&
+    clientEpoch !== serverEpoch;
+  const generationMismatch =
+    canonicalGeneration > 0 && publicationGeneration !== canonicalGeneration;
+  const notActive =
+    !participant ||
+    !participant.sources?.has(source) ||
+    canonical?.desiredState !== "active";
+  if (!publication.closed && (epochMismatch || generationMismatch || notActive)) {
+    mediaDebug(room.env, "cloudflare.publication-rejected", {
+      source,
+      reason: epochMismatch
+        ? "epoch-mismatch"
+        : generationMismatch
+          ? "generation-mismatch"
+          : "not-active",
+      clientEpoch,
+      serverEpoch,
+      publicationGeneration,
+      canonicalGeneration,
+    });
+    return;
+  }
+  let changed = false;
+  const previous = room.publishedSources.get(publicationKey);
   if (publication.closed) {
     for (const [key, current] of room.publishedSources)
       if (
@@ -1170,27 +1227,54 @@ async function handleCloudflarePublication(room, ws, session, data) {
           !current.connectionEpoch ||
           Number(publication.connectionEpoch) >=
             Number(current.connectionEpoch))
-      )
+      ) {
         room.publishedSources.delete(key);
-  } else room.publishedSources.set(publicationKey, publication);
-  room.sourceRevision += 1;
-  room.roomRevision = (room.roomRevision || 0n) + 1n;
+        changed = true;
+      }
+  } else if (previous) {
+    // Idempotent replay: identical canonical publication must not move
+    // revisions. Compare the stored vs incoming publication field-by-field.
+    const ignoredFields = new Set(["updatedAt"]);
+    const same =
+      [...new Set([...Object.keys(previous), ...Object.keys(publication)])]
+        .filter((field) => !ignoredFields.has(field))
+        .every(
+          (field) =>
+            Object.is(previous[field], publication[field]) ||
+            String(previous[field]) === String(publication[field]),
+        );
+    if (!same) {
+      room.publishedSources.set(publicationKey, publication);
+      changed = true;
+    }
+  } else {
+    room.publishedSources.set(publicationKey, publication);
+    changed = true;
+  }
+  // Revision domains are distinct: publicationRevision tracks provider
+  // publication changes, sourceRevision tracks logical desired source-set
+  // mutations, roomRevision tracks any canonical snapshot change.
+  if (changed) {
+    room.publicationRevision = (room.publicationRevision || 0) + 1;
+    room.roomRevision = (room.roomRevision || 0n) + 1n;
+    await room.state.storage.put("publicationRevision", room.publicationRevision);
+    await room.state.storage.put("roomRevision", room.roomRevision);
+    for (const participantOfRoom of room.participants.values())
+      if (participantOfRoom.ws !== ws)
+        room.sendMessage(
+          participantOfRoom.ws,
+          MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+          {
+            ...publication,
+            sourceRevision: room.sourceRevision,
+            publicationRevision: room.publicationRevision,
+            roomRevision: room.roomRevision.toString(),
+          },
+        );
+  }
   await room.state.storage.put("publishedSources", [
     ...room.publishedSources.values(),
   ]);
-  await room.state.storage.put("sourceRevision", room.sourceRevision);
-  await room.state.storage.put("roomRevision", room.roomRevision);
-  for (const participant of room.participants.values())
-    if (participant.ws !== ws)
-      room.sendMessage(
-        participant.ws,
-        MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-        {
-          ...publication,
-          sourceRevision: room.sourceRevision,
-          roomRevision: room.roomRevision.toString(),
-        },
-      );
 }
 
 export async function verifyRoomTicket(room, ticket) {
