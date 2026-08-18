@@ -308,6 +308,12 @@ export async function handleCloudflareRequest(room, ws, session, data) {
   const result = await response.json().catch(() => ({}));
   if (response.ok && operation === "new-session" && result.sessionId) {
     session.cloudflareSessionId = result.sessionId;
+    // Also update the participant record so reconnect preserves it
+    const participantKey = `${session.userId}:${session.deviceId}`;
+    const participant = room.participants.get(participantKey);
+    if (participant?.ws === ws) {
+      participant.cloudflareSessionId = result.sessionId;
+    }
     ws.serializeAttachment(session);
   }
   mediaDebug(room.env, "room.cloudflare-response", {

@@ -520,6 +520,7 @@ export class MediaRoomDO {
           deafened: restored.deafened === true,
           joinedAt: restored.joinedAt || Date.now(),
           connectionEpoch,
+          cloudflareSessionId: restored.cloudflareSessionId ?? null,
         });
         if (Array.isArray(restored.qualifiedPeerIds))
           this.qualificationState.set(restored.peerId, {

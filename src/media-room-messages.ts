@@ -384,6 +384,8 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       participant.deafened = voiceState.deafened;
       session.muted = voiceState.muted;
       session.deafened = voiceState.deafened;
+      session.sourceStates = structuredClone(participant.sourceStates || {});
+      session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
       ws.serializeAttachment(session);
       room.roomRevision++;
       void room.state.storage.put("roomRevision", room.roomRevision);
@@ -432,6 +434,8 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           : participant.capabilityProtocol;
       session.mediaCapabilities = mediaCapabilities;
       session.capabilityProtocol = participant.capabilityProtocol;
+      session.sourceStates = structuredClone(participant.sourceStates || {});
+      session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
       ws.serializeAttachment(session);
       broadcastParticipantCapabilities(room, participant, ws);
       const ackPayload = {
@@ -471,7 +475,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           }
           const hasVideo = [...room.participants.values()].some((candidate) => {
             const candidateSources =
-              candidate === participant ? sources : candidate.sources || [];
+              candidate === participant
+                ? sources
+                : [...(candidate.sources || [])];
             return candidateSources.some((source) => isVideoMediaSource(source));
           });
           const participantLimit = getMediaChannelParticipantLimit(
@@ -512,7 +518,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           const clientSourceStates = data.sourceStates || {};
 
           // Snapshot previous state BEFORE any mutation
-          const allSources = new Set([...previousSources, ...sourceSet]);
+          const allSources = new Set([
+            ...Object.keys(participant.sourceStates || {}),
+            ...previousSources,
+            ...sourceSet,
+          ]);
           const previousStates = new Map();
           for (const source of allSources) {
             previousStates.set(
@@ -533,7 +543,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           // 2. Validate participant limits (done above)
 
           // 3. Validate every generation
-          for (const source of sourceSet) {
+          for (const source of allSources) {
             const clientState = clientSourceStates[source];
             const previousState = previousStates.get(source);
             const clientGeneration = Number.isSafeInteger(clientState?.generation)
@@ -605,7 +615,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
               publication.peerId === session.peerId &&
               !sourceSet.has(publication.source)
             ) {
-              publicationsToRetire.push({ ...publication, closed: true });
+              publicationsToRetire.push({ key, publication: { ...publication, closed: true } });
             }
           }
 
@@ -619,8 +629,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           participant.sources = nextSources;
           session.sources = [...nextSources];
           participant.sourceStates = nextSourceStates;
+          session.sourceStates = structuredClone(nextSourceStates);
+          session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
           for (const retired of publicationsToRetire) {
-            room.publishedSources.delete(`${retired.peerId}:${retired.source}`);
+            room.publishedSources.delete(retired.key);
           }
           ws.serializeAttachment(session);
 
@@ -674,13 +686,13 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
             ackPayload,
           );
-          for (const publication of publicationsToRetire)
+          for (const retired of publicationsToRetire)
             for (const recipient of room.participants.values())
               if (recipient.ws && recipient.ws !== ws)
                 room.sendMessage(
                   recipient.ws,
                   MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-                  publication,
+                  retired.publication,
                 );
           await room.refreshPendingRouteSourceRevision?.();
           room.maybeStartQualification();
@@ -1134,6 +1146,11 @@ async function handleProviderReady(room, ws, session, data) {
   room.providerReadiness.add(session.peerId);
   session.providerReadyEpoch = Number(data.epoch);
   session.providerReadySourceRevision = Number(data.sourceRevision);
+  const participant = room.participants.get(`${session.userId}:${session.deviceId}`);
+  if (participant) {
+    session.sourceStates = structuredClone(participant.sourceStates || {});
+    session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
+  }
   ws.serializeAttachment(session);
   room.providerHealth.set(
     providerHealthKey(data.provider, data.providerId || null),
