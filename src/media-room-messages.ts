@@ -480,21 +480,26 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       if (!participant.sourceStates) participant.sourceStates = {};
       const nowFs = Date.now();
       const clientSourceStates = data.sourceStates || {};
-      for (const source of sourceSet) {
-        const clientState = clientSourceStates[source];
-        const previousState = participant.sourceStates[source] || {
+
+      // Save previous states for comparison
+      const previousStates = new Map();
+      for (const source of [...participant.sources, ...sourceSet]) {
+        previousStates.set(source, participant.sourceStates[source] || {
           generation: 0,
           desiredState: "inactive",
           publicationState: "unpublished",
           provider: null,
-        };
+        });
+      }
+
+      for (const source of sourceSet) {
+        const clientState = clientSourceStates[source];
+        const previousState = previousStates.get(source);
         const isAudioSource = source === "audio";
-        // Source-specific desired state - microphone mute does not deactivate camera/screen
-        const desired =
-          participant.sources.has(source) &&
-          (isAudioSource ? !participant.muted : true)
-            ? "active"
-            : "inactive";
+        // Source existence and mute/transmission are separate concepts.
+        // Audio source desiredState is "active" whenever the source exists in sources.
+        // Mute controls producer pause/transmission, not canonical source existence.
+        const desired = participant.sources.has(source) ? "active" : "inactive";
         const clientGeneration = Number.isSafeInteger(clientState?.generation)
           ? clientState.generation
           : previousState.generation;
@@ -528,24 +533,30 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           );
           return;
         }
+        const newPublicationState = sourceSet.has(source)
+          ? previousState.publicationState === "published"
+            ? "published"
+            : "announced"
+          : "unpublished";
         participant.sourceStates[source] = {
           ...previousState,
           desiredState: desired,
           generation: clientGeneration,
-          publicationState: sourceSet.has(source)
-            ? previousState.publicationState === "published"
-              ? "published"
-              : "announced"
-            : "unpublished",
+          publicationState: newPublicationState,
           provider: previousState.provider,
           updatedAt: nowFs,
         };
       }
       for (const previousSource of previousSources) {
         if (!sourceSet.has(previousSource)) {
+          const prev = previousStates.get(previousSource) || {
+            generation: 0,
+            desiredState: "inactive",
+            publicationState: "unpublished",
+            provider: null,
+          };
           participant.sourceStates[previousSource] = {
-            generation:
-              (participant.sourceStates[previousSource]?.generation || 0) + 1,
+            generation: prev.generation + 1,
             desiredState: "inactive",
             publicationState: "unpublished",
             provider: null,
@@ -553,8 +564,21 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           };
         }
       }
+      // Compute sourceStateChanged: compare generation, desiredState, publicationState, provider
+      const sourceStateChanged = [...previousStates.keys()].some((source) => {
+        const prev = previousStates.get(source);
+        const curr = participant.sourceStates[source];
+        if (!prev && !curr) return false;
+        if (!prev || !curr) return true;
+        return (
+          prev.generation !== curr.generation ||
+          prev.desiredState !== curr.desiredState ||
+          prev.publicationState !== curr.publicationState ||
+          prev.provider !== curr.provider
+        );
+      });
       // Increment revisions BEFORE sending ACK (post-commit revision)
-      if (sourcesChanged || stalePublications.length > 0) {
+      if (sourcesChanged || stalePublications.length > 0 || sourceStateChanged) {
         room.roomRevision++;
         room.sourceRevision++;
         await Promise.all([
