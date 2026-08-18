@@ -80,22 +80,6 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED;
-  if (operationId && isMutation) {
-    if (room.operationResults.has(operationId)) {
-      const cached = room.operationResults.get(operationId);
-      mediaDebug(room.env, "room.operation-replay", {
-        operationId,
-        type,
-        peerId: session.peerId,
-      });
-      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
-        ...cached,
-        operationId,
-        replayed: true,
-      });
-      return;
-    }
-  }
 
   if (!session.authenticated) {
     await authenticateRoomSession(room, ws, session, type, data, now);
@@ -108,7 +92,36 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     ws.close(4000, "Media session superseded");
     return;
   }
+
+  // Operation replay happens only after authentication and current-session
+  // validation. Cache is keyed by participantKey:epoch:operationId so a
+  // superseded socket or a newer connection epoch can never replay a result
+  // that belongs to a different incarnation.
+  if (operationId && isMutation) {
+    const cachedKey = `${session.userId}:${session.deviceId}:${
+      session.connectionEpoch ?? "?"
+    }:${operationId}`;
+    if (room.operationResults.has(cachedKey)) {
+      const cached = room.operationResults.get(cachedKey);
+      mediaDebug(room.env, "room.operation-replay", {
+        operationId,
+        type,
+        peerId: session.peerId,
+        scoped: true,
+      });
+      room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
+        ...cached,
+        operationId,
+        replayed: true,
+      });
+      return;
+    }
+  }
   const participantKey = `${session.userId}:${session.deviceId}`;
+  const operationCacheKey = (operationId) =>
+    operationId
+      ? `${participantKey}:${session.connectionEpoch ?? "?"}:${operationId}`
+      : null;
   const serverConnectionEpoch =
     room.participantConnectionEpochs?.get(participantKey) || 1;
   const clientEpoch = Number(data.connectionEpoch);
@@ -134,7 +147,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.operationResults.set(operationId, nackPayload);
+    room.storeOperationResult(operationCacheKey(operationId), nackPayload);
     room.sendMessage(
       ws,
       MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -168,7 +181,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.operationResults.set(operationId, nackPayload);
+    room.storeOperationResult(operationCacheKey(operationId), nackPayload);
     room.sendMessage(
       ws,
       MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -344,7 +357,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.operationResults.set(operationId, ackPayload);
+      room.storeOperationResult(operationCacheKey(operationId), ackPayload);
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -388,7 +401,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.operationResults.set(operationId, ackPayload);
+      room.storeOperationResult(operationCacheKey(operationId), ackPayload);
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -477,13 +490,16 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             accepted: false,
             code: "STALE_SOURCE_GENERATION",
             retryable: false,
+            // Not blindly retryable: client adopts canonical generation and
+            // reconciles latest desired state with a new fenced operation.
+            adoptsCanonicalGeneration: true,
             roomRevision: String(room.roomRevision),
             source: source,
             expectedGeneration: previousState.generation,
             receivedGeneration: clientGeneration,
             canonicalState: canonicalState,
           };
-          room.operationResults.set(operationId, nackPayload);
+          room.storeOperationResult(operationCacheKey(operationId), nackPayload);
           room.sendMessage(
             ws,
             MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -538,7 +554,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.operationResults.set(operationId, ackPayload);
+      room.storeOperationResult(operationCacheKey(operationId), ackPayload);
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -861,8 +877,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   session.routeEpoch = claims.routeEpoch || 0;
   const participantKey = `${claims.sub}:${claims.deviceId}`;
   const resumedParticipant = room.participants.get(participantKey);
-  const isSameWebSocketResume =
-    resumedParticipant?.ws === ws || session.connectionEpoch != null;
+  const isSameWebSocketResume = resumedParticipant?.ws === ws;
   let connectionEpoch;
   if (isSameWebSocketResume) {
     connectionEpoch =
@@ -1047,7 +1062,7 @@ async function handleLeave(room, ws, session, data) {
       ? room.buildTopologySnapshot()
       : undefined,
   };
-  room.operationResults.set(data.operationId, ackPayload);
+  room.storeOperationResult(operationCacheKey(data.operationId), ackPayload);
   room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, ackPayload);
   ws.close(4000, "leave-acknowledged");
 }
@@ -1158,15 +1173,23 @@ async function handleCloudflarePublication(room, ws, session, data) {
       )
         room.publishedSources.delete(key);
   } else room.publishedSources.set(publicationKey, publication);
+  room.sourceRevision += 1;
+  room.roomRevision = (room.roomRevision || 0n) + 1n;
   await room.state.storage.put("publishedSources", [
     ...room.publishedSources.values(),
   ]);
+  await room.state.storage.put("sourceRevision", room.sourceRevision);
+  await room.state.storage.put("roomRevision", room.roomRevision);
   for (const participant of room.participants.values())
     if (participant.ws !== ws)
       room.sendMessage(
         participant.ws,
         MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-        publication,
+        {
+          ...publication,
+          sourceRevision: room.sourceRevision,
+          roomRevision: room.roomRevision.toString(),
+        },
       );
 }
 

@@ -161,7 +161,7 @@ export class MediaRoomDO {
       muted: true,
       deafened: false,
       joinedAt: Date.now(),
-      connectionEpoch: 1,
+      connectionEpoch: null,
     };
     this.state.acceptWebSocket(ws);
     ws.serializeAttachment(session);
@@ -312,6 +312,7 @@ export class MediaRoomDO {
       qualificationFallbackRoute,
       qualificationParticipantSignature,
       participantConnectionEpochs,
+      operationResults,
     ] = await Promise.all([
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
@@ -327,6 +328,7 @@ export class MediaRoomDO {
       this.state.storage.get("qualificationFallbackRoute"),
       this.state.storage.get("qualificationParticipantSignature"),
       this.state.storage.get("participantConnectionEpochs"),
+      this.state.storage.get("operationResults"),
     ]);
     if (route) this.route = route;
     if (Number.isSafeInteger(epoch)) this.epoch = epoch;
@@ -372,6 +374,15 @@ export class MediaRoomDO {
       );
     } else {
       this.participantConnectionEpochs = new Map();
+    }
+    if (Array.isArray(operationResults)) {
+      this.operationResults = new Map(
+        operationResults.map((entry) => [
+          String(entry?.key || ""),
+          { ...(entry?.value || {}), createdAt: Number(entry?.createdAt) || 0 },
+        ]),
+      );
+      this.cleanupOperationResults();
     }
     const hasPersistedRoomState = Boolean(
       route ||
@@ -452,6 +463,23 @@ export class MediaRoomDO {
     }
   }
 
+  storeOperationResult(key, payload) {
+    if (!key) return;
+    this.operationResults.set(key, {
+      ...payload,
+      createdAt: Date.now(),
+    });
+    this.cleanupOperationResults();
+    void this.state.storage.put(
+      "operationResults",
+      [...this.operationResults.entries()].map(([k, value]) => ({
+        key: k,
+        value,
+        createdAt: value.createdAt,
+      })),
+    );
+  }
+
   getSession(ws) {
     const current = this.sessions.get(ws);
     if (current) return current;
@@ -462,10 +490,14 @@ export class MediaRoomDO {
       const previousParticipant = this.participants.get(participantKey);
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
         // Hibernation: preserve existing epoch, don't increment
-        // Only assign new epoch if this is a truly new session (no existing epoch)
-        let connectionEpoch = this.participantConnectionEpochs?.get(participantKey);
+        // Prefer the map, fall back to the restored attachment's own epoch
+        let connectionEpoch = this.participantConnectionEpochs?.get(
+          participantKey,
+        );
         if (connectionEpoch === undefined) {
-          connectionEpoch = (this.participantConnectionEpochs?.get(participantKey) || 0) + 1;
+          connectionEpoch = Number.isSafeInteger(restored.connectionEpoch)
+            ? restored.connectionEpoch
+            : 1;
           this.participantConnectionEpochs.set(participantKey, connectionEpoch);
         }
         this.participants.set(participantKey, {
