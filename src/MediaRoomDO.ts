@@ -84,10 +84,10 @@ export class MediaRoomDO {
     this.stateLoaded = false;
     this.operationHistory = new Set();
     this.operationResults = new Map();
-      this.maxOperationHistory = 1000;
-      this.operationResultsTTL = 5 * 60 * 1000;
-      this.leavePending = new Set();
-      this.participantConnectionEpochs = new Map();
+    this.maxOperationHistory = 1000;
+    this.operationResultsTTL = 5 * 60 * 1000;
+    this.leavePending = new Set();
+    this.participantConnectionEpochs = new Map();
   }
 
   async fetch(request) {
@@ -301,9 +301,9 @@ export class MediaRoomDO {
     const [
       route,
       epoch,
-          sourceRevision,
-          publicationRevision,
-          roomRevision,
+      sourceRevision,
+      publicationRevision,
+      roomRevision,
       pendingRoute,
       pendingStartedAt,
       publishedSources,
@@ -496,9 +496,8 @@ export class MediaRoomDO {
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
         // Hibernation: preserve existing epoch, don't increment
         // Prefer the map, fall back to the restored attachment's own epoch
-        let connectionEpoch = this.participantConnectionEpochs?.get(
-          participantKey,
-        );
+        let connectionEpoch =
+          this.participantConnectionEpochs?.get(participantKey);
         if (connectionEpoch === undefined) {
           connectionEpoch = Number.isSafeInteger(restored.connectionEpoch)
             ? restored.connectionEpoch

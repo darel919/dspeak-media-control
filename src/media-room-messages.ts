@@ -143,7 +143,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.storeOperationResult(operationCacheKey(session, operationId), nackPayload);
+    room.storeOperationResult(
+      operationCacheKey(session, operationId),
+      nackPayload,
+    );
     room.sendMessage(
       ws,
       MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -177,7 +180,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.storeOperationResult(operationCacheKey(session, operationId), nackPayload);
+    room.storeOperationResult(
+      operationCacheKey(session, operationId),
+      nackPayload,
+    );
     room.sendMessage(
       ws,
       MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -363,7 +369,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(operationCacheKey(session, operationId), ackPayload);
+      room.storeOperationResult(
+        operationCacheKey(session, operationId),
+        ackPayload,
+      );
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -407,7 +416,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(operationCacheKey(session, operationId), ackPayload);
+      room.storeOperationResult(
+        operationCacheKey(session, operationId),
+        ackPayload,
+      );
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -505,7 +517,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             receivedGeneration: clientGeneration,
             canonicalState: canonicalState,
           };
-          room.storeOperationResult(operationCacheKey(session, operationId), nackPayload);
+          room.storeOperationResult(
+            operationCacheKey(session, operationId),
+            nackPayload,
+          );
           room.sendMessage(
             ws,
             MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -560,7 +575,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(operationCacheKey(session, operationId), ackPayload);
+      room.storeOperationResult(
+        operationCacheKey(session, operationId),
+        ackPayload,
+      );
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
@@ -1076,7 +1094,10 @@ async function handleLeave(room, ws, session, data) {
       ? room.buildTopologySnapshot()
       : undefined,
   };
-  room.storeOperationResult(operationCacheKey(session, data.operationId), ackPayload);
+  room.storeOperationResult(
+    operationCacheKey(session, data.operationId),
+    ackPayload,
+  );
   room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, ackPayload);
   ws.close(4000, "leave-acknowledged");
 }
@@ -1192,7 +1213,10 @@ async function handleCloudflarePublication(room, ws, session, data) {
     !participant ||
     !participant.sources?.has(source) ||
     canonical?.desiredState !== "active";
-  if (!publication.closed && (epochMismatch || generationMismatch || notActive)) {
+  if (
+    !publication.closed &&
+    (epochMismatch || generationMismatch || notActive)
+  ) {
     mediaDebug(room.env, "cloudflare.publication-rejected", {
       source,
       reason: epochMismatch
@@ -1235,14 +1259,15 @@ async function handleCloudflarePublication(room, ws, session, data) {
     // Idempotent replay: identical canonical publication must not move
     // revisions. Compare the stored vs incoming publication field-by-field.
     const ignoredFields = new Set(["updatedAt"]);
-    const same =
-      [...new Set([...Object.keys(previous), ...Object.keys(publication)])]
-        .filter((field) => !ignoredFields.has(field))
-        .every(
-          (field) =>
-            Object.is(previous[field], publication[field]) ||
-            String(previous[field]) === String(publication[field]),
-        );
+    const same = [
+      ...new Set([...Object.keys(previous), ...Object.keys(publication)]),
+    ]
+      .filter((field) => !ignoredFields.has(field))
+      .every(
+        (field) =>
+          Object.is(previous[field], publication[field]) ||
+          String(previous[field]) === String(publication[field]),
+      );
     if (!same) {
       room.publishedSources.set(publicationKey, publication);
       changed = true;
@@ -1257,7 +1282,10 @@ async function handleCloudflarePublication(room, ws, session, data) {
   if (changed) {
     room.publicationRevision = (room.publicationRevision || 0) + 1;
     room.roomRevision = (room.roomRevision || 0n) + 1n;
-    await room.state.storage.put("publicationRevision", room.publicationRevision);
+    await room.state.storage.put(
+      "publicationRevision",
+      room.publicationRevision,
+    );
     await room.state.storage.put("roomRevision", room.roomRevision);
     for (const participantOfRoom of room.participants.values())
       if (participantOfRoom.ws !== ws)
