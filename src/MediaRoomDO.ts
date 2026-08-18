@@ -907,6 +907,7 @@ export class MediaRoomDO {
       epoch: String(pending?.epoch || this.epoch),
       sourceRevision: String(this.sourceRevision),
       roomRevision: this.roomRevision.toString(),
+      publicationRevision: this.publicationRevision,
       participants: participantList,
       peers: participantList,
       provider: pending?.provider || this.route.provider,

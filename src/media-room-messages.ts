@@ -549,8 +549,20 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             const clientGeneration = Number.isSafeInteger(clientState?.generation)
               ? clientState.generation
               : previousState.generation;
+            const inNewSet = sourceSet.has(source);
+            const wasInPreviousSet = previousSources.has(source);
+            const desired = inNewSet ? "active" : "inactive";
+            const desiredChanged = desired !== previousState.desiredState;
+            const membershipChanged = inNewSet !== wasInPreviousSet;
             const isStale = clientGeneration < previousState.generation;
-            if (isStale) {
+            // Enforce strictly increasing generation for actual state transitions
+            // Idempotent replays (same desired state + same membership) allow equality
+            const requiresGenerationAdvance = desiredChanged || membershipChanged;
+            const generationValid =
+              requiresGenerationAdvance
+                ? clientGeneration > previousState.generation
+                : clientGeneration >= previousState.generation;
+            if (isStale || !generationValid) {
               const canonicalState = room.buildTopologySnapshot
                 ? room.buildTopologySnapshot()
                 : undefined;
@@ -562,7 +574,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
                 adoptsCanonicalGeneration: true,
                 roomRevision: String(room.roomRevision),
                 source,
-                expectedGeneration: previousState.generation,
+                expectedGeneration: previousState.generation + (requiresGenerationAdvance ? 1 : 0),
                 receivedGeneration: clientGeneration,
                 canonicalState,
               };
@@ -617,6 +629,14 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             ) {
               publicationsToRetire.push({ key, publication: { ...publication, closed: true } });
             }
+            // Also retire older generations for sources that are still present but advanced generation
+            else if (
+              publication.peerId === session.peerId &&
+              sourceSet.has(publication.source) &&
+              publication.generation < nextSourceStates[publication.source]?.generation
+            ) {
+              publicationsToRetire.push({ key, publication: { ...publication, closed: true } });
+            }
           }
 
           // 6. Commit atomically
@@ -658,9 +678,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ) {
             room.roomRevision++;
             room.sourceRevision++;
+            room.publicationRevision = (room.publicationRevision || 0) + 1;
             await Promise.all([
               room.state.storage.put("roomRevision", room.roomRevision),
               room.state.storage.put("sourceRevision", room.sourceRevision),
+              room.state.storage.put("publicationRevision", room.publicationRevision),
               publicationsToRetire.length
                 ? room.state.storage.put("publishedSources", [
                     ...room.publishedSources.values(),
@@ -1031,10 +1053,16 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     session.cloudflareSessionId = preservedCloudflareSessionId;
   }
 
+  // Synchronize resumed participant state into session BEFORE first serialization.
+  // This ensures hibernation captures canonical source state even if no subsequent
+  // source/voice/capability mutation occurs before hibernation.
+  if (resumedParticipant) {
+    session.sources = [...(resumedParticipant.sources || [])];
+    session.sourceStates = structuredClone(resumedParticipant.sourceStates || {});
+  }
+
   const hasVideo = [...room.participants.values()].some((participant) =>
-    [...(participant.sources || [])].some((source) =>
-      isVideoMediaSource(source),
-    ),
+    [...(participant.sources || [])].some((source) => isVideoMediaSource(source)),
   );
   const participantLimit = getMediaChannelParticipantLimit(
     session.connectionMode,
