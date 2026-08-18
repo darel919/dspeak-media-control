@@ -299,6 +299,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         roomRevision: room.roomRevision.toString(),
         epoch: room.epoch,
         sourceRevision: room.sourceRevision,
+        publicationRevision: room.publicationRevision,
         connectionEpoch:
           room.participantConnectionEpochs?.get(
             `${session.userId}:${session.deviceId}`,
@@ -678,7 +679,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ) {
             room.roomRevision++;
             room.sourceRevision++;
-            room.publicationRevision = (room.publicationRevision || 0) + 1;
+            // publicationRevision only increments when publishedSources actually changes
+            if (publicationsToRetire.length > 0) {
+              room.publicationRevision = (room.publicationRevision || 0) + 1;
+            }
             await Promise.all([
               room.state.storage.put("roomRevision", room.roomRevision),
               room.state.storage.put("sourceRevision", room.sourceRevision),

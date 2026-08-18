@@ -701,6 +701,10 @@ export class MediaRoomDO {
       this.publishedSources.delete(key);
       retired.push({ ...publication, closed: true });
     }
+    // Increment publicationRevision when publications are retired
+    if (retired.length > 0) {
+      this.publicationRevision++;
+    }
     for (const publication of retired)
       for (const participant of this.participants.values())
         if (participant.peerId !== peerId && participant.ws)
