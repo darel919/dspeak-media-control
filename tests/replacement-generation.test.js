@@ -381,3 +381,98 @@ test("hibernation with a connected client keeps reconciliation monotonic", async
   second.retireParticipantPublications("peer-1");
   assert.ok(second.publicationRevision >= loadedRevision);
 });
+
+test("serialized session attachment carries the newest publicationState after a provider callback", async () => {
+  let attached = null;
+  const storage = {
+    values: {},
+    async get(key) {
+      return this.values[key] ?? null;
+    },
+    async put(key, value) {
+      this.values[key] = value;
+    },
+    async delete(key) {
+      delete this.values[key];
+    },
+    async setAlarm() {},
+  };
+  const env = {
+    MEDIA_CONTROL_ADMIN_TOKEN: "admin",
+    CLOUDFLARE_REALTIME_APP_ID: "app",
+    CLOUDFLARE_REALTIME_APP_SECRET: "secret",
+  };
+  const instance = new MediaRoomDO({ storage, getWebSockets: () => [] }, env);
+  instance.stateLoaded = true;
+  instance.route = createSFURoute(
+    SFU_PROVIDER.CLOUDFLARE_REALTIME,
+    1,
+    0,
+    "test",
+  );
+
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    sources: ["screen"],
+    cloudflareSessionId: "session-1",
+    connectionEpoch: 1,
+  };
+  const ws = {
+    serializeAttachment(value) {
+      attached = value;
+    },
+    send() {},
+  };
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws,
+    sources: new Set(["screen"]),
+    sourceStates: {},
+    connectionEpoch: 1,
+    cloudflareSessionId: "session-1",
+  });
+  instance.isCurrentParticipantSession = () => true;
+
+  // Canonical intent: client announces screen as active (sourceState
+  // publicationState "announced").
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+    data: {
+      sources: ["screen"],
+      sourceStates: {
+        screen: { generation: 1, desiredState: "active" },
+      },
+      operationId: "op-announce-screen",
+    },
+  });
+
+  // Provider callback: screen publication becomes live -> publicationState
+  // must transition from announced to published.
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION,
+    data: {
+      peerId: "peer-1",
+      source: "screen",
+      trackName: "track-screen",
+      sessionId: "session-1",
+      generation: 1,
+      connectionEpoch: 1,
+      closed: false,
+    },
+  });
+
+  // The authoritative participant state must have been copied into the
+  // session BEFORE serialization, so hibernation reconstructs the NEW state.
+  assert.equal(
+    instance.participants.get("user-1:device-1").sourceStates.screen
+      .publicationState,
+    "published",
+  );
+  assert.equal(attached.sourceStates.screen.publicationState, "published");
+  assert.equal(attached.cloudflareSessionId, "session-1");
+});

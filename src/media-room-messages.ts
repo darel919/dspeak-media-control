@@ -1474,6 +1474,14 @@ async function handleCloudflarePublication(room, ws, session, data) {
         room.state.storage.put("sourceRevision", room.sourceRevision),
         room.state.storage.put("roomRevision", room.roomRevision),
       ]);
+      // Copy the authoritative participant state into the session BEFORE
+      // serializing: hibernation reconstructs entirely from the attachment,
+      // so a stale session.sourceStates would persist the old
+      // publicationState ("announced") even though the revision already
+      // advanced to the transition that produced "published".
+      session.sourceStates = structuredClone(participant.sourceStates);
+      if (participant.cloudflareSessionId)
+        session.cloudflareSessionId = participant.cloudflareSessionId;
       if (typeof ws.serializeAttachment === "function")
         ws.serializeAttachment(session);
       room.broadcastTopology();
