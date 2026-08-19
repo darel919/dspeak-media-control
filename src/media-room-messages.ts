@@ -261,6 +261,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           roomRevision: room.roomRevision.toString(),
           epoch: room.epoch,
           sourceRevision: room.sourceRevision,
+          publicationRevision: room.publicationRevision,
           connectionEpoch:
             room.participantConnectionEpochs?.get(
               `${session.userId}:${session.deviceId}`,
@@ -305,30 +306,30 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             `${session.userId}:${session.deviceId}`,
           ) || 1,
         publishedSourcesDigest: [...room.publishedSources.values()]
-            .filter((publication) => publication.peerId !== session.peerId)
-            .map((publication) => ({
-              source: publication.source,
-              peerId: publication.peerId,
-              generation: publication.generation,
-              trackName: publication.trackName,
-              connectionEpoch: publication.connectionEpoch,
-              sessionId: publication.sessionId,
-              ownerSource: publication.ownerSource ?? null,
-              variantId: publication.variantId ?? null,
-              logicalStreamId: publication.logicalStreamId ?? null,
-              codec: publication.codec ?? null,
-              codecAcceleration: publication.codecAcceleration ?? null,
-              codecImplementation: publication.codecImplementation ?? null,
-              width: publication.width ?? null,
-              height: publication.height ?? null,
-              fps: publication.fps ?? null,
-              bitrate: publication.bitrate ?? null,
-              target: publication.target ?? null,
-              targetAdjusted: publication.targetAdjusted ?? null,
-              receivers: publication.receivers ?? [],
-              emergency: publication.emergency ?? false,
-              score: publication.score ?? null,
-            })),
+          .filter((publication) => publication.peerId !== session.peerId)
+          .map((publication) => ({
+            source: publication.source,
+            peerId: publication.peerId,
+            generation: publication.generation,
+            trackName: publication.trackName,
+            connectionEpoch: publication.connectionEpoch,
+            sessionId: publication.sessionId,
+            ownerSource: publication.ownerSource ?? null,
+            variantId: publication.variantId ?? null,
+            logicalStreamId: publication.logicalStreamId ?? null,
+            codec: publication.codec ?? null,
+            codecAcceleration: publication.codecAcceleration ?? null,
+            codecImplementation: publication.codecImplementation ?? null,
+            width: publication.width ?? null,
+            height: publication.height ?? null,
+            fps: publication.fps ?? null,
+            bitrate: publication.bitrate ?? null,
+            target: publication.target ?? null,
+            targetAdjusted: publication.targetAdjusted ?? null,
+            receivers: publication.receivers ?? [],
+            emergency: publication.emergency ?? false,
+            score: publication.score ?? null,
+          })),
       });
       break;
     }
@@ -462,269 +463,277 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       relayCodecMigrationState(room, ws, session, data);
       break;
     case MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES: {
-          const participant = room.participants.get(
-            `${session.userId}:${session.deviceId}`,
-          );
-          if (!participant) break;
-          const sources = normalizeMediaSources(data.sources);
-          if (!sources) {
-            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
-              code: "INVALID_MEDIA_SOURCES",
-              error: "Media source identifiers are invalid",
-            });
-            break;
-          }
-          const hasVideo = [...room.participants.values()].some((candidate) => {
-            const candidateSources =
-              candidate === participant
-                ? sources
-                : [...(candidate.sources || [])];
-            return candidateSources.some((source) => isVideoMediaSource(source));
-          });
-          const participantLimit = getMediaChannelParticipantLimit(
-            session.connectionMode,
-            hasVideo,
-          );
-          if (room.participants.size > participantLimit) {
-            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
-              code: "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
-              error: `This media channel supports up to ${participantLimit} participants for the active media mode`,
-            });
-            break;
-          }
+      const participant = room.participants.get(
+        `${session.userId}:${session.deviceId}`,
+      );
+      if (!participant) break;
+      const sources = normalizeMediaSources(data.sources);
+      if (!sources) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "INVALID_MEDIA_SOURCES",
+          error: "Media source identifiers are invalid",
+        });
+        break;
+      }
+      const hasVideo = [...room.participants.values()].some((candidate) => {
+        const candidateSources =
+          candidate === participant ? sources : [...(candidate.sources || [])];
+        return candidateSources.some((source) => isVideoMediaSource(source));
+      });
+      const participantLimit = getMediaChannelParticipantLimit(
+        session.connectionMode,
+        hasVideo,
+      );
+      if (room.participants.size > participantLimit) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "MEDIA_CHANNEL_PARTICIPANT_LIMIT_EXCEEDED",
+          error: `This media channel supports up to ${participantLimit} participants for the active media mode`,
+        });
+        break;
+      }
 
-          const operationId = data.operationId;
-          if (!operationId || typeof operationId !== "string") {
-            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
-              code: "MISSING_OPERATION_ID",
-              error: "MEDIA_SOURCES mutation requires operationId",
-            });
-            break;
-          }
-          if (room.operationHistory.has(operationId)) {
-            room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
-              operationId,
-              accepted: false,
-              code: "DUPLICATE_OPERATION",
-              retryable: false,
-            });
-            break;
-          }
+      const operationId = data.operationId;
+      if (!operationId || typeof operationId !== "string") {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
+          code: "MISSING_OPERATION_ID",
+          error: "MEDIA_SOURCES mutation requires operationId",
+        });
+        break;
+      }
+      if (room.operationHistory.has(operationId)) {
+        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
+          operationId,
+          accepted: false,
+          code: "DUPLICATE_OPERATION",
+          retryable: false,
+        });
+        break;
+      }
 
-          // ============================================================
-          // VALIDATE-THEN-COMMIT: build all next state in temp structures
-          // ============================================================
-          const sourceSet = new Set(sources);
-          const previousSources = new Set(participant.sources || new Set());
-          const clientSourceStates = data.sourceStates || {};
+      // ============================================================
+      // VALIDATE-THEN-COMMIT: build all next state in temp structures
+      // ============================================================
+      const sourceSet = new Set(sources);
+      const previousSources = new Set(participant.sources || new Set());
+      const clientSourceStates = data.sourceStates || {};
 
-          // Snapshot previous state BEFORE any mutation
-          const allSources = new Set([
-            ...Object.keys(participant.sourceStates || {}),
-            ...previousSources,
-            ...sourceSet,
-          ]);
-          const previousStates = new Map();
-          for (const source of allSources) {
-            previousStates.set(
-              source,
-              structuredClone(
-                participant.sourceStates?.[source] ?? {
-                  generation: 0,
-                  desiredState: "inactive",
-                  publicationState: "unpublished",
-                  provider: null,
-                },
-              ),
-            );
-          }
+      // Snapshot previous state BEFORE any mutation
+      const allSources = new Set([
+        ...Object.keys(participant.sourceStates || {}),
+        ...previousSources,
+        ...sourceSet,
+      ]);
+      const previousStates = new Map();
+      for (const source of allSources) {
+        previousStates.set(
+          source,
+          structuredClone(
+            participant.sourceStates?.[source] ?? {
+              generation: 0,
+              desiredState: "inactive",
+              publicationState: "unpublished",
+              provider: null,
+            },
+          ),
+        );
+      }
 
-          // 1. Validate source identifiers (already done by normalizeMediaSources)
+      // 1. Validate source identifiers (already done by normalizeMediaSources)
 
-          // 2. Validate participant limits (done above)
+      // 2. Validate participant limits (done above)
 
-          // 3. Validate every generation
-          for (const source of allSources) {
-            const clientState = clientSourceStates[source];
-            const previousState = previousStates.get(source);
-            const clientGeneration = Number.isSafeInteger(clientState?.generation)
-              ? clientState.generation
-              : previousState.generation;
-            const inNewSet = sourceSet.has(source);
-            const wasInPreviousSet = previousSources.has(source);
-            const desired = inNewSet ? "active" : "inactive";
-            const desiredChanged = desired !== previousState.desiredState;
-            const membershipChanged = inNewSet !== wasInPreviousSet;
-            const isStale = clientGeneration < previousState.generation;
-            // Enforce strictly increasing generation for actual state transitions
-            // Idempotent replays (same desired state + same membership) allow equality
-            const requiresGenerationAdvance = desiredChanged || membershipChanged;
-            const generationValid =
-              requiresGenerationAdvance
-                ? clientGeneration > previousState.generation
-                : clientGeneration >= previousState.generation;
-            if (isStale || !generationValid) {
-              const canonicalState = room.buildTopologySnapshot
-                ? room.buildTopologySnapshot()
-                : undefined;
-              const nackPayload = {
-                operationId,
-                accepted: false,
-                code: "STALE_SOURCE_GENERATION",
-                retryable: false,
-                adoptsCanonicalGeneration: true,
-                roomRevision: String(room.roomRevision),
-                source,
-                expectedGeneration: previousState.generation + (requiresGenerationAdvance ? 1 : 0),
-                receivedGeneration: clientGeneration,
-                canonicalState,
-              };
-              room.storeOperationResult(
-                operationCacheKey(session, operationId),
-                nackPayload,
-              );
-              room.sendMessage(
-                ws,
-                MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
-                nackPayload,
-              );
-              return;
-            }
-          }
-
-          // 4. Validate epoch (control epoch is implicit in session)
-
-          // 5. Calculate complete next state
-          const nextSources = new Set(sourceSet);
-          const nextSourceStates = {};
-          const nowFs = Date.now();
-          for (const source of allSources) {
-            const previousState = previousStates.get(source);
-            const inNewSet = sourceSet.has(source);
-            const desired = inNewSet ? "active" : "inactive";
-            const clientState = clientSourceStates[source];
-            const clientGeneration = Number.isSafeInteger(clientState?.generation)
-              ? clientState.generation
-              : previousState.generation;
-            const newPublicationState = inNewSet
-              ? previousState.publicationState === "published"
-                ? "published"
-                : "announced"
-              : "unpublished";
-            nextSourceStates[source] = {
-              ...previousState,
-              desiredState: desired,
-              generation: clientGeneration,
-              publicationState: newPublicationState,
-              provider: previousState.provider,
-              updatedAt: nowFs,
-            };
-          }
-
-          // Compute publications to retire
-          const publicationsToRetire = [];
-          for (const [key, publication] of room.publishedSources) {
-            if (
-              publication.peerId === session.peerId &&
-              !sourceSet.has(publication.source)
-            ) {
-              publicationsToRetire.push({ key, publication: { ...publication, closed: true } });
-            }
-            // Also retire older generations for sources that are still present but advanced generation
-            else if (
-              publication.peerId === session.peerId &&
-              sourceSet.has(publication.source) &&
-              publication.generation < nextSourceStates[publication.source]?.generation
-            ) {
-              publicationsToRetire.push({ key, publication: { ...publication, closed: true } });
-            }
-          }
-
-          // 6. Commit atomically
-          room.operationHistory.add(operationId);
-          if (room.operationHistory.size > room.maxOperationHistory) {
-            const firstKey = room.operationHistory.keys().next().value;
-            if (firstKey !== undefined) room.operationHistory.delete(firstKey);
-          }
-
-          participant.sources = nextSources;
-          session.sources = [...nextSources];
-          participant.sourceStates = nextSourceStates;
-          session.sourceStates = structuredClone(nextSourceStates);
-          session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
-          for (const retired of publicationsToRetire) {
-            room.publishedSources.delete(retired.key);
-          }
-          ws.serializeAttachment(session);
-
-          // Compute sourceStateChanged for revision bump
-          const sourceStateChanged = [...previousStates.keys()].some((source) => {
-            const prev = previousStates.get(source);
-            const curr = nextSourceStates[source];
-            if (!prev && !curr) return false;
-            if (!prev || !curr) return true;
-            return (
-              prev.generation !== curr.generation ||
-              prev.desiredState !== curr.desiredState ||
-              prev.publicationState !== curr.publicationState ||
-              prev.provider !== curr.provider
-            );
-          });
-
-          if (
-            previousSources.size !== nextSources.size ||
-            [...previousSources].some((s) => !nextSources.has(s)) ||
-            publicationsToRetire.length > 0 ||
-            sourceStateChanged
-          ) {
-            room.roomRevision++;
-            room.sourceRevision++;
-            // publicationRevision only increments when publishedSources actually changes
-            if (publicationsToRetire.length > 0) {
-              room.publicationRevision = (room.publicationRevision || 0) + 1;
-            }
-            await Promise.all([
-              room.state.storage.put("roomRevision", room.roomRevision),
-              room.state.storage.put("sourceRevision", room.sourceRevision),
-              room.state.storage.put("publicationRevision", room.publicationRevision),
-              publicationsToRetire.length
-                ? room.state.storage.put("publishedSources", [
-                    ...room.publishedSources.values(),
-                  ])
-                : Promise.resolve(),
-            ]);
-          }
-
-          const ackPayload = {
+      // 3. Validate every generation
+      for (const source of allSources) {
+        const clientState = clientSourceStates[source];
+        const previousState = previousStates.get(source);
+        const clientGeneration = Number.isSafeInteger(clientState?.generation)
+          ? clientState.generation
+          : previousState.generation;
+        const inNewSet = sourceSet.has(source);
+        const wasInPreviousSet = previousSources.has(source);
+        const desired = inNewSet ? "active" : "inactive";
+        const desiredChanged = desired !== previousState.desiredState;
+        const membershipChanged = inNewSet !== wasInPreviousSet;
+        const isStale = clientGeneration < previousState.generation;
+        // Enforce strictly increasing generation for actual state transitions
+        // Idempotent replays (same desired state + same membership) allow equality
+        const requiresGenerationAdvance = desiredChanged || membershipChanged;
+        const generationValid = requiresGenerationAdvance
+          ? clientGeneration > previousState.generation
+          : clientGeneration >= previousState.generation;
+        if (isStale || !generationValid) {
+          const canonicalState = room.buildTopologySnapshot
+            ? room.buildTopologySnapshot()
+            : undefined;
+          const nackPayload = {
             operationId,
-            accepted: true,
-            roomRevision: room.roomRevision.toString(),
-            canonicalState: room.buildTopologySnapshot
-              ? room.buildTopologySnapshot()
-              : undefined,
+            accepted: false,
+            code: "STALE_SOURCE_GENERATION",
+            retryable: false,
+            adoptsCanonicalGeneration: true,
+            roomRevision: String(room.roomRevision),
+            source,
+            expectedGeneration:
+              previousState.generation + (requiresGenerationAdvance ? 1 : 0),
+            receivedGeneration: clientGeneration,
+            canonicalState,
           };
           room.storeOperationResult(
             operationCacheKey(session, operationId),
-            ackPayload,
+            nackPayload,
           );
           room.sendMessage(
             ws,
             MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
-            ackPayload,
+            nackPayload,
           );
-          for (const retired of publicationsToRetire)
-            for (const recipient of room.participants.values())
-              if (recipient.ws && recipient.ws !== ws)
-                room.sendMessage(
-                  recipient.ws,
-                  MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-                  retired.publication,
-                );
-          await room.refreshPendingRouteSourceRevision?.();
-          room.maybeStartQualification();
-          room.broadcastTopology();
-          break;
+          return;
         }
+      }
+
+      // 4. Validate epoch (control epoch is implicit in session)
+
+      // 5. Calculate complete next state
+      const nextSources = new Set(sourceSet);
+      const nextSourceStates = {};
+      const nowFs = Date.now();
+      for (const source of allSources) {
+        const previousState = previousStates.get(source);
+        const inNewSet = sourceSet.has(source);
+        const desired = inNewSet ? "active" : "inactive";
+        const clientState = clientSourceStates[source];
+        const clientGeneration = Number.isSafeInteger(clientState?.generation)
+          ? clientState.generation
+          : previousState.generation;
+        const newPublicationState = inNewSet
+          ? previousState.publicationState === "published"
+            ? "published"
+            : "announced"
+          : "unpublished";
+        nextSourceStates[source] = {
+          ...previousState,
+          desiredState: desired,
+          generation: clientGeneration,
+          publicationState: newPublicationState,
+          provider: previousState.provider,
+          updatedAt: nowFs,
+        };
+      }
+
+      // Compute publications to retire
+      const publicationsToRetire = [];
+      for (const [key, publication] of room.publishedSources) {
+        if (
+          publication.peerId === session.peerId &&
+          !sourceSet.has(publication.source)
+        ) {
+          publicationsToRetire.push({
+            key,
+            publication: { ...publication, closed: true },
+          });
+        }
+        // Also retire older generations for sources that are still present but advanced generation
+        else if (
+          publication.peerId === session.peerId &&
+          sourceSet.has(publication.source) &&
+          publication.generation <
+            nextSourceStates[publication.source]?.generation
+        ) {
+          publicationsToRetire.push({
+            key,
+            publication: { ...publication, closed: true },
+          });
+        }
+      }
+
+      // 6. Commit atomically
+      room.operationHistory.add(operationId);
+      if (room.operationHistory.size > room.maxOperationHistory) {
+        const firstKey = room.operationHistory.keys().next().value;
+        if (firstKey !== undefined) room.operationHistory.delete(firstKey);
+      }
+
+      participant.sources = nextSources;
+      session.sources = [...nextSources];
+      participant.sourceStates = nextSourceStates;
+      session.sourceStates = structuredClone(nextSourceStates);
+      session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
+      for (const retired of publicationsToRetire) {
+        room.publishedSources.delete(retired.key);
+      }
+      ws.serializeAttachment(session);
+
+      // Compute sourceStateChanged for revision bump
+      const sourceStateChanged = [...previousStates.keys()].some((source) => {
+        const prev = previousStates.get(source);
+        const curr = nextSourceStates[source];
+        if (!prev && !curr) return false;
+        if (!prev || !curr) return true;
+        return (
+          prev.generation !== curr.generation ||
+          prev.desiredState !== curr.desiredState ||
+          prev.publicationState !== curr.publicationState ||
+          prev.provider !== curr.provider
+        );
+      });
+
+      if (
+        previousSources.size !== nextSources.size ||
+        [...previousSources].some((s) => !nextSources.has(s)) ||
+        publicationsToRetire.length > 0 ||
+        sourceStateChanged
+      ) {
+        room.roomRevision++;
+        room.sourceRevision++;
+        // publicationRevision only increments when publishedSources actually changes
+        if (publicationsToRetire.length > 0) {
+          room.publicationRevision = (room.publicationRevision || 0) + 1;
+        }
+        await Promise.all([
+          room.state.storage.put("roomRevision", room.roomRevision),
+          room.state.storage.put("sourceRevision", room.sourceRevision),
+          room.state.storage.put(
+            "publicationRevision",
+            room.publicationRevision,
+          ),
+          publicationsToRetire.length
+            ? room.state.storage.put("publishedSources", [
+                ...room.publishedSources.values(),
+              ])
+            : Promise.resolve(),
+        ]);
+      }
+
+      const ackPayload = {
+        operationId,
+        accepted: true,
+        roomRevision: room.roomRevision.toString(),
+        canonicalState: room.buildTopologySnapshot
+          ? room.buildTopologySnapshot()
+          : undefined,
+      };
+      room.storeOperationResult(
+        operationCacheKey(session, operationId),
+        ackPayload,
+      );
+      room.sendMessage(
+        ws,
+        MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+        ackPayload,
+      );
+      for (const retired of publicationsToRetire)
+        for (const recipient of room.participants.values())
+          if (recipient.ws && recipient.ws !== ws)
+            room.sendMessage(
+              recipient.ws,
+              MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+              retired.publication,
+            );
+      await room.refreshPendingRouteSourceRevision?.();
+      room.maybeStartQualification();
+      room.broadcastTopology();
+      break;
+    }
     case MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED:
       if (
         Number(data.epoch) !== room.epoch ||
@@ -1062,11 +1071,15 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   // source/voice/capability mutation occurs before hibernation.
   if (resumedParticipant) {
     session.sources = [...(resumedParticipant.sources || [])];
-    session.sourceStates = structuredClone(resumedParticipant.sourceStates || {});
+    session.sourceStates = structuredClone(
+      resumedParticipant.sourceStates || {},
+    );
   }
 
   const hasVideo = [...room.participants.values()].some((participant) =>
-    [...(participant.sources || [])].some((source) => isVideoMediaSource(source)),
+    [...(participant.sources || [])].some((source) =>
+      isVideoMediaSource(source),
+    ),
   );
   const participantLimit = getMediaChannelParticipantLimit(
     session.connectionMode,
@@ -1178,7 +1191,9 @@ async function handleProviderReady(room, ws, session, data) {
   room.providerReadiness.add(session.peerId);
   session.providerReadyEpoch = Number(data.epoch);
   session.providerReadySourceRevision = Number(data.sourceRevision);
-  const participant = room.participants.get(`${session.userId}:${session.deviceId}`);
+  const participant = room.participants.get(
+    `${session.userId}:${session.deviceId}`,
+  );
   if (participant) {
     session.sourceStates = structuredClone(participant.sourceStates || {});
     session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
