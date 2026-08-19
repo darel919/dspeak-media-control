@@ -82,75 +82,72 @@ function createMockSession(overrides = {}) {
   };
 }
 
-test(
-  "Phase 1: participant-local MEDIA_SOURCES skips global roomRevision CAS",
-  async () => {
-    const instance = createTestRoom({
-      providerHealth: {
-        [SFU_PROVIDER.CLOUDFLARE_REALTIME]: { healthy: true },
-      },
-    });
-    const ws = createMockWs();
-    const session = createMockSession();
+test("Phase 1: participant-local MEDIA_SOURCES skips global roomRevision CAS", async () => {
+  const instance = createTestRoom({
+    providerHealth: {
+      [SFU_PROVIDER.CLOUDFLARE_REALTIME]: { healthy: true },
+    },
+  });
+  const ws = createMockWs();
+  const session = createMockSession();
 
-    instance.participants.set("user-1:device-1", {
-      userId: "user-1",
-      deviceId: "device-1",
-      peerId: "peer-1",
-      ws,
-      sources: new Set(["audio"]),
-    });
-    instance.isCurrentParticipantSession = () => true;
-    instance.participantConnectionEpochs.set("user-1:device-1", 1);
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws,
+    sources: new Set(["audio"]),
+  });
+  instance.isCurrentParticipantSession = () => true;
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
 
-    // First operation succeeds
-    await handleRoomMessage(instance, ws, session, {
-      type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
-      data: {
-        sources: ["audio"],
-        operationId: "op-1",
-        expectedRoomRevision: "0",
-        sourceStates: { audio: { generation: 1, desiredState: "active" } },
-      },
-    });
+  // First operation succeeds
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+    data: {
+      sources: ["audio"],
+      operationId: "op-1",
+      expectedRoomRevision: "0",
+      sourceStates: { audio: { generation: 1, desiredState: "active" } },
+    },
+  });
 
-    // Simulate revision advancing on server
-    instance.roomRevision = 2n;
+  // Simulate revision advancing on server
+  instance.roomRevision = 2n;
 
-    // Client sends with stale expectedRoomRevision - should SUCCEED (skip global CAS for participant-local mutation)
-    await handleRoomMessage(instance, ws, session, {
-      type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
-      data: {
-        sources: ["audio"],
-        operationId: "op-2",
-        expectedRoomRevision: "0",
-        sourceStates: { audio: { generation: 1, desiredState: "active" } },
-      },
-    });
+  // Client sends with stale expectedRoomRevision - should SUCCEED (skip global CAS for participant-local mutation)
+  await handleRoomMessage(instance, ws, session, {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+    data: {
+      sources: ["audio"],
+      operationId: "op-2",
+      expectedRoomRevision: "0",
+      sourceStates: { audio: { generation: 1, desiredState: "active" } },
+    },
+  });
 
-    const ackMsg = ws.messages.findLast(
-      (m) => m.type === MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+  const ackMsg = ws.messages.findLast(
+    (m) => m.type === MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+  );
+  assert.ok(ackMsg, "Should receive OPERATION_ACK");
+  // Participant-local mutations should NOT return ROOM_REVISION_CONFLICT
+  assert.equal(ackMsg.data.accepted, true);
+  assert.ok(!ackMsg.data.code || ackMsg.data.code !== "ROOM_REVISION_CONFLICT");
+
+  // Should NOT have received fatal ERROR message
+  const errorMsg = ws.messages.find(
+    (m) => m.type === MEDIA_CONTROL_MESSAGE_TYPES.ERROR,
+  );
+  // MEDIA_PROVIDER_UNAVAILABLE is expected when no provider is configured
+  // The important thing is that ROOM_REVISION_CONFLICT is not returned
+  if (errorMsg) {
+    assert.notEqual(
+      errorMsg.data.code,
+      "ROOM_REVISION_CONFLICT",
+      "Should not send ROOM_REVISION_CONFLICT for participant-local mutation",
     );
-    assert.ok(ackMsg, "Should receive OPERATION_ACK");
-    // Participant-local mutations should NOT return ROOM_REVISION_CONFLICT
-    assert.equal(ackMsg.data.accepted, true);
-    assert.ok(!ackMsg.data.code || ackMsg.data.code !== "ROOM_REVISION_CONFLICT");
-
-    // Should NOT have received fatal ERROR message
-    const errorMsg = ws.messages.find(
-      (m) => m.type === MEDIA_CONTROL_MESSAGE_TYPES.ERROR,
-    );
-    // MEDIA_PROVIDER_UNAVAILABLE is expected when no provider is configured
-    // The important thing is that ROOM_REVISION_CONFLICT is not returned
-    if (errorMsg) {
-      assert.notEqual(
-        errorMsg.data.code,
-        "ROOM_REVISION_CONFLICT",
-        "Should not send ROOM_REVISION_CONFLICT for participant-local mutation",
-      );
-    }
-  },
-);
+  }
+});
 
 test("Phase 1: STALE_CONNECTION_EPOCH returns NACK via OPERATION_ACK not fatal ERROR", async () => {
   const instance = createTestRoom();
@@ -532,7 +529,7 @@ test("Phase 1: error codes in OPERATION_ACK NACK follow contract (retryable bool
   assert.equal(ackMsg.data.retryable, true);
   assert.ok(ackMsg.data.connectionEpoch);
 
-  // Test ROOM_REVISION_CONFLICT NACK using a non-participant-local mutation
+  // Test LEAVE operation now succeeds regardless of expectedRoomRevision (no global CAS)
   instance.roomRevision = 10n;
   ws.messages.length = 0;
   await handleRoomMessage(instance, ws, session, {
@@ -546,8 +543,8 @@ test("Phase 1: error codes in OPERATION_ACK NACK follow contract (retryable bool
   ackMsg = ws.messages.find(
     (m) => m.type === MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
   );
-  assert.equal(ackMsg.data.code, "ROOM_REVISION_CONFLICT");
-  assert.equal(ackMsg.data.retryable, true);
+  assert.equal(ackMsg.data.accepted, true);
+  assert.ok(!ackMsg.data.code);
 });
 
 test("Phase 1: STALE_SOURCE_GENERATION rejected for replay of retired incarnation", async () => {

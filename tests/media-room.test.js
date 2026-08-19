@@ -126,17 +126,32 @@ test("duplicate media source announcements do not churn the source revision", as
     peerId: "peer-1",
     ws,
     sources: new Set(),
+    sourceStates: {},
   });
   instance.isCurrentParticipantSession = () => true;
 
   const message = {
     type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
-    data: { sources: ["audio", "camera"], operationId: "op-sources-1" },
+    data: {
+      sources: ["audio", "camera"],
+      sourceStates: {
+        audio: { generation: 1, desiredState: "active" },
+        camera: { generation: 1, desiredState: "active" },
+      },
+      operationId: "op-sources-1",
+    },
   };
   await handleRoomMessage(instance, ws, session, message);
   const message2 = {
     type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
-    data: { sources: ["audio", "camera"], operationId: "op-sources-2" },
+    data: {
+      sources: ["audio", "camera"],
+      sourceStates: {
+        audio: { generation: 1, desiredState: "active" },
+        camera: { generation: 1, desiredState: "active" },
+      },
+      operationId: "op-sources-2",
+    },
   };
   await handleRoomMessage(instance, ws, session, message2);
 

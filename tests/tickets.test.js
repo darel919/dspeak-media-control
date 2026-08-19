@@ -241,7 +241,14 @@ test("enforces direct audio/video and auto channel participant ceilings", async 
     firstVideoParticipant.session,
     {
       type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
-      data: { sources: ["microphone", "camera"] },
+      data: {
+        sources: ["microphone", "camera"],
+        sourceStates: {
+          microphone: { generation: 1, desiredState: "active" },
+          camera: { generation: 1, desiredState: "active" },
+        },
+        operationId: "op-video-1",
+      },
     },
   );
   for (let index = 2; index <= 4; index++)

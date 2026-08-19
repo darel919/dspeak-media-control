@@ -173,8 +173,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     type === MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_TICKET ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_READY ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.LEAVE;
+    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED;
 
   if (
     isMutation &&
@@ -517,7 +516,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       if (cachedKey && room.operationResults.has(cachedKey)) {
         const cached = room.operationResults.get(cachedKey);
         if (cached) {
-          room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, cached);
+          room.sendMessage(
+            ws,
+            MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+            cached,
+          );
         }
         break;
       }
@@ -658,18 +661,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         }
       }
 
-      // 6. Commit atomically
-            const commitKey = operationCacheKey(session, operationId);
-            if (commitKey) {
-              room.storeOperationResult(commitKey, {
-                operationId,
-                accepted: true,
-                roomRevision: String(room.roomRevision),
-                sourceRevision: room.sourceRevision,
-              });
-            }
-
-            participant.sources = nextSources;
+      // 6. Commit atomically - do NOT store provisional result
+      // Store only the final result after all mutations and revisions are committed
+      participant.sources = nextSources;
       session.sources = [...nextSources];
       participant.sourceStates = nextSourceStates;
       session.sourceStates = structuredClone(nextSourceStates);
