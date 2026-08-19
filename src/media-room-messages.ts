@@ -155,53 +155,6 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     );
     return;
   }
-  const hasExpectedRoomRevision =
-    typeof data.expectedRoomRevision === "string" &&
-    data.expectedRoomRevision.length > 0;
-  const expectedRoomRevision = hasExpectedRoomRevision
-    ? data.expectedRoomRevision
-    : null;
-
-  // Global room revision CAS is only required for mutations that affect
-  // canonical room topology (route changes, provider transitions, etc.).
-  // Participant-local mutations (media-sources, voice-state, capabilities, etc.)
-  // are fenced by connectionEpoch + sourceGeneration + operationId, not by
-  // global room revision.
-  const requiresGlobalRoomRevisionCas =
-    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.ROUTE_COMMIT ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_TICKET ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_READY ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED;
-
-  if (
-    isMutation &&
-    requiresGlobalRoomRevisionCas &&
-    hasExpectedRoomRevision &&
-    expectedRoomRevision !== room.roomRevision.toString()
-  ) {
-    const nackPayload = {
-      operationId,
-      accepted: false,
-      code: "ROOM_REVISION_CONFLICT",
-      retryable: true,
-      roomRevision: room.roomRevision.toString(),
-      canonicalState: room.buildTopologySnapshot
-        ? room.buildTopologySnapshot()
-        : undefined,
-    };
-    room.storeOperationResult(
-      operationCacheKey(session, operationId),
-      nackPayload,
-    );
-    room.sendMessage(
-      ws,
-      MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
-      nackPayload,
-    );
-    return;
-  }
 
   switch (type) {
     case MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT: {
