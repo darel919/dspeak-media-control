@@ -247,6 +247,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           sequence: data.sequence,
           topology: room.buildTopologySnapshot(),
           roomRevision: room.roomRevision.toString(),
+          publicationRevision: room.publicationRevision,
           epoch: room.epoch,
           sourceRevision: room.sourceRevision,
           connectionEpoch:
@@ -680,28 +681,26 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       if (
         previousSources.size !== nextSources.size ||
         [...previousSources].some((s) => !nextSources.has(s)) ||
-        publicationsToRetire.length > 0 ||
         sourceStateChanged
       ) {
         room.roomRevision++;
         room.sourceRevision++;
-        // publicationRevision only increments when publishedSources actually changes
-        if (publicationsToRetire.length > 0) {
-          room.publicationRevision = (room.publicationRevision || 0) + 1;
-        }
         await Promise.all([
           room.state.storage.put("roomRevision", room.roomRevision),
           room.state.storage.put("sourceRevision", room.sourceRevision),
-          room.state.storage.put(
-            "publicationRevision",
-            room.publicationRevision,
-          ),
-          publicationsToRetire.length
-            ? room.state.storage.put("publishedSources", [
-                ...room.publishedSources.values(),
-              ])
-            : Promise.resolve(),
         ]);
+      }
+      // Publication retirement goes through the centralized revision helper:
+      // one bump, one persistence commit (publishedSources +
+      // publicationRevision + roomRevision), and close pushes that carry the
+      // new revision. The helper also bumps roomRevision, so skipping the
+      // source-only branch above is safe when retirements occur.
+      if (publicationsToRetire.length > 0) {
+        room.commitPublicationMutation({
+          removed: publicationsToRetire.map((retired) => retired.publication),
+          excludedWs: ws,
+          sourceRevision: room.sourceRevision,
+        });
       }
 
       const ackPayload = {
@@ -721,14 +720,6 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
         ackPayload,
       );
-      for (const retired of publicationsToRetire)
-        for (const recipient of room.participants.values())
-          if (recipient.ws && recipient.ws !== ws)
-            room.sendMessage(
-              recipient.ws,
-              MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-              retired.publication,
-            );
       await room.refreshPendingRouteSourceRevision?.();
       room.maybeStartQualification();
       room.broadcastTopology();
@@ -1155,6 +1146,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     roomRevision: room.roomRevision.toString(),
     epoch: room.epoch,
     sourceRevision: room.sourceRevision,
+    publicationRevision: room.publicationRevision,
     connectionEpoch,
   });
   broadcastParticipantCapabilities(
@@ -1170,7 +1162,12 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
       room.sendMessage(
         ws,
         MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-        publication,
+        {
+          ...publication,
+          publicationRevision: room.publicationRevision,
+          roomRevision: room.roomRevision.toString(),
+          sourceRevision: room.sourceRevision,
+        },
       );
   if (room.pendingRoute)
     await room.issueProviderTicket(
@@ -1397,6 +1394,7 @@ async function handleCloudflarePublication(room, ws, session, data) {
     return;
   }
   let changed = false;
+  const closedPublications = [];
   const previous = room.publishedSources.get(publicationKey);
   if (publication.closed) {
     for (const [key, current] of room.publishedSources)
@@ -1418,6 +1416,7 @@ async function handleCloudflarePublication(room, ws, session, data) {
             Number(current.connectionEpoch))
       ) {
         room.publishedSources.delete(key);
+        closedPublications.push({ ...current, closed: true });
         changed = true;
       }
   } else if (previous) {
@@ -1445,29 +1444,41 @@ async function handleCloudflarePublication(room, ws, session, data) {
   // publication changes, sourceRevision tracks logical desired source-set
   // mutations, roomRevision tracks any canonical snapshot change.
   if (changed) {
-    room.publicationRevision = (room.publicationRevision || 0) + 1;
-    room.roomRevision = (room.roomRevision || 0n) + 1n;
-    await room.state.storage.put(
-      "publicationRevision",
-      room.publicationRevision,
-    );
-    await room.state.storage.put("roomRevision", room.roomRevision);
-    for (const participantOfRoom of room.participants.values())
-      if (participantOfRoom.ws !== ws)
-        room.sendMessage(
-          participantOfRoom.ws,
-          MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-          {
-            ...publication,
-            sourceRevision: room.sourceRevision,
-            publicationRevision: room.publicationRevision,
-            roomRevision: room.roomRevision.toString(),
-          },
-        );
+    room.commitPublicationMutation({
+      removed: publication.closed ? closedPublications : [],
+      upserted: publication.closed ? [] : [publication],
+      excludedWs: ws,
+    });
   }
-  await room.state.storage.put("publishedSources", [
-    ...room.publishedSources.values(),
-  ]);
+  // publicationState mirrors the canonical FSM: a live provider publication
+  // means "published"; a closed one means the source has no provider
+  // publication and returns to "announced" (still active by intent) or
+  // "unpublished" (inactive). This keeps sourceState.publicationState
+  // authoritative instead of frozen from an earlier intent mutation.
+  if (participant?.sourceStates?.[source]) {
+    const sourceState = participant.sourceStates[source];
+    const nextPublicationState = publication.closed
+      ? sourceState.desiredState === "active"
+        ? "announced"
+        : "unpublished"
+      : "published";
+    if (sourceState.publicationState !== nextPublicationState) {
+      participant.sourceStates[source] = {
+        ...sourceState,
+        publicationState: nextPublicationState,
+        updatedAt: Date.now(),
+      };
+      room.sourceRevision++;
+      room.roomRevision = (room.roomRevision || 0n) + 1n;
+      void Promise.all([
+        room.state.storage.put("sourceRevision", room.sourceRevision),
+        room.state.storage.put("roomRevision", room.roomRevision),
+      ]);
+      if (typeof ws.serializeAttachment === "function")
+        ws.serializeAttachment(session);
+      room.broadcastTopology();
+    }
+  }
 }
 
 export async function verifyRoomTicket(room, ticket) {

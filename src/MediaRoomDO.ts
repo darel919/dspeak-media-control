@@ -413,6 +413,9 @@ export class MediaRoomDO {
   async resetDormantRoomState() {
     this.sourceRevision++;
     this.roomRevision++;
+    // Publication-set invariant: any publishedSources clear also advances and
+    // persists publicationRevision so a reconstructed DO never rolls back.
+    this.publicationRevision++;
     this.epoch = Math.max(this.epoch, Number(this.route.epoch) || 0) + 1;
     this.route = createLocalRoute(
       this.epoch,
@@ -433,6 +436,7 @@ export class MediaRoomDO {
       this.state.storage.put("route", this.route),
       this.state.storage.put("epoch", this.epoch),
       this.state.storage.put("sourceRevision", this.sourceRevision),
+      this.state.storage.put("publicationRevision", this.publicationRevision),
       this.state.storage.put("roomRevision", this.roomRevision),
       this.state.storage.put("publishedSources", []),
       this.state.storage.put("providerHealth", {}),
@@ -594,6 +598,7 @@ export class MediaRoomDO {
       targetProviderId: pending?.providerId,
       targetRoute: pending || undefined,
       sourceRevision: this.sourceRevision,
+      publicationRevision: this.publicationRevision,
       participants: this.getParticipantList(),
       peers: this.getParticipantList(),
       ...extra,
@@ -676,6 +681,7 @@ export class MediaRoomDO {
       this.state.storage.put("publishedSources", [
         ...this.publishedSources.values(),
       ]),
+      this.state.storage.put("publicationRevision", this.publicationRevision),
       this.state.storage.put("sourceRevision", this.sourceRevision),
       this.state.storage.put("roomRevision", this.roomRevision),
       this.state.storage.put(
@@ -701,19 +707,72 @@ export class MediaRoomDO {
       this.publishedSources.delete(key);
       retired.push({ ...publication, closed: true });
     }
-    // Increment publicationRevision when publications are retired
-    if (retired.length > 0) {
-      this.publicationRevision++;
-    }
-    for (const publication of retired)
-      for (const participant of this.participants.values())
-        if (participant.peerId !== peerId && participant.ws)
-          this.sendMessage(
-            participant.ws,
-            MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-            publication,
-          );
+    this.commitPublicationMutation({ removed: retired });
     return retired;
+  }
+
+  // Single entry point for the publication-revision domain. Callers mutate
+  // publishedSources first, then commit the mutation here: revision bump,
+  // durable persistence (publishedSources + publicationRevision + roomRevision
+  // as one logical commit), and receiver pushes carrying the new revision.
+  commitPublicationMutation({
+    removed = [],
+    upserted = [],
+    broadcast = true,
+    excludedWs = null,
+    sourceRevision = null,
+  } = {}) {
+    const changed = removed.length > 0 || upserted.length > 0;
+    if (!changed)
+      return {
+        changed: false,
+        publicationRevision: this.publicationRevision,
+      };
+    this.publicationRevision = (this.publicationRevision || 0) + 1;
+    this.roomRevision = (this.roomRevision || 0n) + 1n;
+    void Promise.all([
+      this.state.storage.put("publicationRevision", this.publicationRevision),
+      this.state.storage.put("roomRevision", this.roomRevision),
+      this.state.storage.put(
+        "sourceRevision",
+        sourceRevision ?? this.sourceRevision,
+      ),
+      this.state.storage.put("publishedSources", [
+        ...this.publishedSources.values(),
+      ]),
+    ]);
+    if (broadcast) {
+      for (const publication of removed)
+        this.broadcastPublicationPush(publication, excludedWs);
+      for (const publication of upserted)
+        this.broadcastPublicationPush(publication, excludedWs);
+    }
+    return {
+      changed: true,
+      publicationRevision: this.publicationRevision,
+    };
+  }
+
+  broadcastPublicationPush(publication, excludedWs = null) {
+    const push = {
+      ...publication,
+      publicationRevision: this.publicationRevision,
+      roomRevision: this.roomRevision.toString(),
+      sourceRevision: this.sourceRevision,
+    };
+    for (const participant of this.participants.values()) {
+      const ws = participant.ws;
+      if (
+        ws &&
+        ws !== excludedWs &&
+        (ws.readyState === undefined || ws.readyState === WebSocket.OPEN)
+      )
+        this.sendMessage(
+          ws,
+          MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+          push,
+        );
+    }
   }
 
   getConfiguredProviderCapabilities() {
@@ -1006,6 +1065,7 @@ export class MediaRoomDO {
       this.state.storage.put("publishedSources", [
         ...this.publishedSources.values(),
       ]),
+      this.state.storage.put("publicationRevision", this.publicationRevision),
       this.state.storage.put("sourceRevision", this.sourceRevision),
       this.state.storage.put("roomRevision", this.roomRevision),
       this.state.storage.put(

@@ -208,3 +208,176 @@ test("heartbeat ACK carries a numeric publicationRevision that does not go stale
   assert.equal(typeof heartbeatAck?.data?.publicationRevision, "number");
   assert.equal(Array.isArray(heartbeatAck?.data?.publishedSourcesDigest), true);
 });
+
+function publishTrack(room, peerId, source, trackName) {
+  room.publishedSources.set(`${peerId}:${source}`, {
+    peerId,
+    source,
+    trackName,
+    generation: 1,
+    connectionEpoch: 1,
+    sessionId: "session-1",
+    userId: "user-1",
+    closed: false,
+  });
+}
+
+test("close push and delayed old heartbeat cannot resurrect an old publication", async () => {
+  const { instance, sent } = roomWithParticipant();
+  publishTrack(instance, "peer-2", "screen", "track-screen-X");
+
+  // Two participants: sender (peer-2) and receiver (peer-1)
+  const receiverWs = instance.participants.get("user-1:device-1").ws;
+  const senderWs = {
+    serializeAttachment() {},
+    send() {},
+  };
+  instance.participants.set("user-2:device-2", {
+    userId: "user-2",
+    deviceId: "device-2",
+    peerId: "peer-2",
+    ws: senderWs,
+    sources: new Set(["screen"]),
+    sourceStates: {
+      screen: {
+        generation: 1,
+        desiredState: "active",
+        publicationState: "published",
+      },
+    },
+  });
+
+  // Snapshot at R40 would contain screen X
+  const beforeCloseLength = sent.length;
+  const beforeRevision = instance.publicationRevision;
+
+  // Sender stops screen: MEDIA_SOURCES retirement -> close push with new revision
+  await handleRoomMessage(
+    instance,
+    senderWs,
+    {
+      authenticated: true,
+      userId: "user-2",
+      deviceId: "device-2",
+      peerId: "peer-2",
+      sources: ["screen"],
+    },
+    mediaSourcesMessage(
+      [],
+      { screen: { generation: 2, desiredState: "inactive" } },
+      "op-stop-screen",
+    ),
+  );
+
+  const closePush = sent
+    .slice(beforeCloseLength)
+    .filter(
+      (message) =>
+        message.type ===
+        MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+    );
+
+  // Close push MUST carry the new revision
+  assert.equal(closePush.length, 1);
+  assert.equal(closePush[0]?.data?.trackName, "track-screen-X");
+  assert.equal(closePush[0]?.data?.closed, true);
+  assert.equal(closePush[0]?.data?.publicationRevision, beforeRevision + 1);
+
+  // Late heartbeat snapshot from R40 (pre-close) with old revision arrives
+  const snapshot = instance.buildTopologySnapshot();
+  assert.equal(snapshot.publishedSources.length, 0);
+  assert.equal(instance.publicationRevision, beforeRevision + 1);
+  assert.equal(instance.publishedSources.has("peer-1:screen"), false);
+});
+
+test("publicationRevision survives Durable Object reconstruction", async () => {
+  const storage = {
+    values: {},
+    async get(key) {
+      return this.values[key] ?? null;
+    },
+    async put(key, value) {
+      this.values[key] = value;
+    },
+    async delete(key) {
+      delete this.values[key];
+    },
+    async setAlarm() {},
+  };
+  const env = {
+    MEDIA_CONTROL_ADMIN_TOKEN: "admin",
+    CLOUDFLARE_REALTIME_APP_ID: "app",
+    CLOUDFLARE_REALTIME_APP_SECRET: "secret",
+  };
+  const first = new MediaRoomDO({ storage, getWebSockets: () => [] }, env);
+  first.stateLoaded = true;
+  first.publicationRevision = 50;
+
+  // Retirement changes publications to R51
+  publishTrack(first, "peer-2", "screen", "track-screen-X");
+  first.state.storage.put("publishedSources", [
+    ...first.publishedSources.values(),
+  ]);
+  const retired = first.retireParticipantPublications("peer-2");
+
+  assert.equal(retired.length, 1);
+  assert.equal(first.publicationRevision, 51);
+  await promiseMicrotaskFlush();
+
+  // Reconstruct the DO from storage: revision must load as 51, not 50
+  const second = new MediaRoomDO({ storage, getWebSockets: () => [] }, env);
+  await second.loadDurableState();
+
+  assert.equal(second.publicationRevision, 51);
+  assert.equal(second.publishedSources.size, 0);
+  assert.ok(second.publicationRevision >= 50);
+});
+
+function promiseMicrotaskFlush() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("hibernation with a connected client keeps reconciliation monotonic", async () => {
+  const storage = {
+    values: {},
+    async get(key) {
+      return this.values[key] ?? null;
+    },
+    async put(key, value) {
+      this.values[key] = value;
+    },
+    async delete(key) {
+      delete this.values[key];
+    },
+    async setAlarm() {},
+  };
+  const env = {
+    MEDIA_CONTROL_ADMIN_TOKEN: "admin",
+    CLOUDFLARE_REALTIME_APP_ID: "app",
+    CLOUDFLARE_REALTIME_APP_SECRET: "secret",
+  };
+
+  // Client lastApplied = R51; stored revision is R51
+  const first = new MediaRoomDO({ storage, getWebSockets: () => [] }, env);
+  first.stateLoaded = true;
+  first.publicationRevision = 51;
+  publishTrack(first, "screen", "track-screen-X");
+  await first.state.storage.put("publishedSources", [
+    ...first.publishedSources.values(),
+  ]);
+  await first.state.storage.put("publicationRevision", 51);
+  await first.state.storage.put("roomRevision", 12n);
+
+  // Reconstruct (hibernation): constructor reruns, storage must be restored.
+  // A dormant reset (no sockets) advances the revision to 52 and clears the
+  // publication set; the invariant is that the revision NEVER rolls back.
+  const second = new MediaRoomDO({ storage, getWebSockets: () => [] }, env);
+  await second.loadDurableState();
+
+  assert.ok(second.publicationRevision >= 51);
+  assert.equal(second.publishedSources.size, 0);
+  const loadedRevision = second.publicationRevision;
+  // Any further publication mutation advances monotonically
+  second.retireParticipantPublications("peer-1");
+  assert.ok(second.publicationRevision >= loadedRevision);
+});

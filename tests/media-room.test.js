@@ -529,17 +529,20 @@ test("replacing a participant session retires its old media state", () => {
     reason: "Media session superseded",
   });
   assert.equal(instance.publishedSources.has("old-peer:audio"), false);
-  assert.deepEqual(recipientMessages, [
-    {
-      type: MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
-      data: {
-        peerId: "old-peer",
-        source: "audio",
-        trackName: "old-track",
-        closed: true,
-      },
-    },
-  ]);
+  // Close pushes must carry the revision envelope so receivers can fence
+  // stale heartbeats against the mutation that retired the publication.
+  const closePush = recipientMessages[0];
+  assert.equal(
+    closePush.type,
+    MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_PUBLICATION_AVAILABLE,
+  );
+  assert.equal(closePush.data.peerId, "old-peer");
+  assert.equal(closePush.data.source, "audio");
+  assert.equal(closePush.data.trackName, "old-track");
+  assert.equal(closePush.data.closed, true);
+  assert.equal(closePush.data.publicationRevision, 1);
+  assert.equal(closePush.data.roomRevision, "1");
+  assert.equal(closePush.data.sourceRevision, 4);
   assert.equal(instance.qualificationState.has("old-peer"), false);
   assert.equal(instance.providerReadiness.has("old-peer"), false);
   assert.equal(instance.transitionReadiness.has("old-peer"), false);
