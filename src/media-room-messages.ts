@@ -161,15 +161,24 @@ export async function handleRoomMessage(room, ws, session, envelope) {
   const expectedRoomRevision = hasExpectedRoomRevision
     ? data.expectedRoomRevision
     : null;
-  const isParticipantLocalMutation =
-    type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE;
+
+  // Global room revision CAS is only required for mutations that affect
+  // canonical room topology (route changes, provider transitions, etc.).
+  // Participant-local mutations (media-sources, voice-state, capabilities, etc.)
+  // are fenced by connectionEpoch + sourceGeneration + operationId, not by
+  // global room revision.
+  const requiresGlobalRoomRevisionCas =
+    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.ROUTE_COMMIT ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_TICKET ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_READY ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_FAILED ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.LEAVE;
+
   if (
     isMutation &&
-    !isParticipantLocalMutation &&
+    requiresGlobalRoomRevisionCas &&
     hasExpectedRoomRevision &&
     expectedRoomRevision !== room.roomRevision.toString()
   ) {
