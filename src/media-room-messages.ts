@@ -79,7 +79,8 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED;
+    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.LEAVE;
 
   if (!session.authenticated) {
     await authenticateRoomSession(room, ws, session, type, data, now);
@@ -163,7 +164,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
   const isParticipantLocalMutation =
     type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_CAPABILITIES ||
     type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_READY ||
-    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED;
+    type === MEDIA_CONTROL_MESSAGE_TYPES.P2P_QUALIFIED ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES ||
+    type === MEDIA_CONTROL_MESSAGE_TYPES.PARTICIPANT_VOICE_STATE;
   if (
     isMutation &&
     !isParticipantLocalMutation &&
@@ -501,13 +504,12 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         });
         break;
       }
-      if (room.operationHistory.has(operationId)) {
-        room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, {
-          operationId,
-          accepted: false,
-          code: "DUPLICATE_OPERATION",
-          retryable: false,
-        });
+      const cachedKey = operationCacheKey(session, operationId);
+      if (cachedKey && room.operationResults.has(cachedKey)) {
+        const cached = room.operationResults.get(cachedKey);
+        if (cached) {
+          room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK, cached);
+        }
         break;
       }
 
@@ -648,13 +650,17 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       }
 
       // 6. Commit atomically
-      room.operationHistory.add(operationId);
-      if (room.operationHistory.size > room.maxOperationHistory) {
-        const firstKey = room.operationHistory.keys().next().value;
-        if (firstKey !== undefined) room.operationHistory.delete(firstKey);
-      }
+            const commitKey = operationCacheKey(session, operationId);
+            if (commitKey) {
+              room.storeOperationResult(commitKey, {
+                operationId,
+                accepted: true,
+                roomRevision: String(room.roomRevision),
+                sourceRevision: room.sourceRevision,
+              });
+            }
 
-      participant.sources = nextSources;
+            participant.sources = nextSources;
       session.sources = [...nextSources];
       participant.sourceStates = nextSourceStates;
       session.sourceStates = structuredClone(nextSourceStates);
