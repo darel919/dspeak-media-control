@@ -1003,6 +1003,8 @@ export class MediaRoomDO {
       operationId,
       accepted,
       roomRevision: this.roomRevision.toString(),
+      sourceRevision: Number(this.sourceRevision),
+      publicationRevision: this.publicationRevision,
       connectionEpoch: extra.connectionEpoch,
       canonicalState: snapshot,
       ...extra,

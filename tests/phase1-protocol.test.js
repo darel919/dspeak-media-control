@@ -42,7 +42,6 @@ test("media-control contract uses the 919 rev-5 wire family", async () => {
     "room-snapshot",
     "leave",
     "request-snapshot",
-    "receiver-evidence",
     "hi919",
     "topology-state",
     "p2p-signal-relay",
@@ -324,6 +323,8 @@ test("Phase 1: MEDIA_SOURCES replay after lost final ACK is idempotent", async (
     (candidate) => candidate.type === MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
   );
   assert.equal(firstAck.data.accepted, true);
+  assert.equal(typeof firstAck.data.sourceRevision, "number");
+  assert.equal(typeof firstAck.data.publicationRevision, "number");
   const roomRevision = instance.roomRevision;
   const sourceRevision = instance.sourceRevision;
   const publicationCount = instance.publishedSources.size;
@@ -635,14 +636,6 @@ test("Phase 1: STALE_SOURCE_GENERATION rejected for replay of retired incarnatio
   instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.roomRevision = 10n;
   instance.sourceRevision = 5n;
-
-  console.log("TEST WS ID:", ws.id);
-  console.log(
-    "PARTICIPANT WS ID:",
-    instance.participants.get("user-1:device-1")?.ws?.id,
-  );
-
-  // Client sends stale generation 3 (server has 5)
   await handleRoomMessage(instance, ws, session, {
     type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
     data: {

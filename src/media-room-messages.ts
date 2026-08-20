@@ -540,6 +540,8 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             retryable: false,
             adoptsCanonicalGeneration: true,
             roomRevision: String(room.roomRevision),
+            sourceRevision: Number(room.sourceRevision),
+            publicationRevision: room.publicationRevision,
             source,
             expectedGeneration:
               previousState.generation + (requiresGenerationAdvance ? 1 : 0),
@@ -669,6 +671,8 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         operationId,
         accepted: true,
         roomRevision: room.roomRevision.toString(),
+        sourceRevision: Number(room.sourceRevision),
+        publicationRevision: room.publicationRevision,
         canonicalState: room.buildTopologySnapshot
           ? room.buildTopologySnapshot()
           : undefined,
