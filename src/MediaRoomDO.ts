@@ -347,7 +347,7 @@ export class MediaRoomDO {
         now - participant.disconnectedAt >= CONTROL_GRACE_PERIOD_MS
       )
         await this.finalizeParticipantDisconnect(participantKey, participant);
-    if (sockets.length > 0 || this.participants.size > 0)
+    if (this.sessions.size > 0 || this.participants.size > 0)
       await this.state.storage.setAlarm?.(now + CONTROL_HEARTBEAT_INTERVAL_MS);
     if (
       this.route.kind === MEDIA_ROUTE_KIND.P2P &&
@@ -507,11 +507,7 @@ export class MediaRoomDO {
     );
     const sockets = this.state.getWebSockets?.() || [];
     for (const ws of sockets) this.getSession(ws);
-    if (
-      hasPersistedRoomState &&
-      !sockets.length &&
-      this.participants.size === 0
-    )
+    if (hasPersistedRoomState && this.participants.size === 0)
       await this.resetDormantRoomState();
     this.stateLoaded = true;
   }
@@ -614,10 +610,15 @@ export class MediaRoomDO {
       const staleRestoredEpoch =
         canonicalEpoch !== undefined &&
         (!hasRestoredEpoch || restoredEpoch !== canonicalEpoch);
-      if (
-        !staleRestoredEpoch &&
-        (!previousParticipant?.ws || previousParticipant.ws === ws)
-      ) {
+      const ownedByAnotherSocket =
+        Boolean(previousParticipant?.ws) && previousParticipant?.ws !== ws;
+      if (staleRestoredEpoch || ownedByAnotherSocket) {
+        try {
+          ws.close(4000, "Media session superseded");
+        } catch {}
+        return restored;
+      }
+      if (!previousParticipant?.ws || previousParticipant.ws === ws) {
         const connectionEpoch =
           canonicalEpoch ?? (hasRestoredEpoch ? restoredEpoch : 1);
         if (canonicalEpoch === undefined) {
@@ -733,7 +734,11 @@ export class MediaRoomDO {
 
   broadcastTopology() {
     for (const [ws, session] of this.sessions)
-      if (session.authenticated && ws.readyState === WebSocket.OPEN)
+      if (
+        session.authenticated &&
+        this.isCurrentParticipantSession(ws, session) &&
+        ws.readyState === WebSocket.OPEN
+      )
         this.sendTopology(ws);
   }
 
@@ -1190,14 +1195,16 @@ export class MediaRoomDO {
   }
 
   getConnectionMode() {
-    for (const session of this.sessions.values())
-      if (session.authenticated) return session.connectionMode;
+    for (const [ws, session] of this.sessions)
+      if (this.isCurrentParticipantSession(ws, session))
+        return session.connectionMode;
     return "auto";
   }
 
   getRoomId() {
-    for (const session of this.sessions.values())
-      if (session.authenticated && session.channelId) return session.channelId;
+    for (const [ws, session] of this.sessions)
+      if (this.isCurrentParticipantSession(ws, session) && session.channelId)
+        return session.channelId;
     return "unknown";
   }
 

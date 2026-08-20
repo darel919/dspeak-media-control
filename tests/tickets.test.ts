@@ -53,6 +53,7 @@ function capacitySocket() {
   return {
     messages: [],
     attachment: null,
+    readyState: 1,
     closeCode: null,
     send(message) {
       this.messages.push(JSON.parse(message));
@@ -121,57 +122,132 @@ test("same-WebSocket hibernation restoration keeps the connection epoch", async 
   assert.equal(room.participants.get("user-1:device-1").ws, first.ws);
 });
 
-test("hibernated restoration fences an older attachment behind the canonical epoch", async () => {
+test("hibernated restoration keeps only the current epoch eligible in either socket order", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = { OPEN: 1 };
+  try {
+    for (const staleFirst of [true, false]) {
+      const room = capacityRoom();
+      const staleWs = capacitySocket();
+      const currentWs = capacitySocket();
+      const participantKey = "user-1:device-1";
+      staleWs.attachment = {
+        authenticated: true,
+        userId: "user-1",
+        deviceId: "device-1",
+        channelId: "channel-1",
+        peerId: "peer-1",
+        connectionMode: "direct",
+        connectionEpoch: 1,
+        sources: [],
+        sourceStates: {},
+      };
+      currentWs.attachment = {
+        authenticated: true,
+        userId: "user-1",
+        deviceId: "device-1",
+        channelId: "channel-1",
+        peerId: "peer-2",
+        connectionMode: "auto",
+        connectionEpoch: 2,
+        sources: [],
+        sourceStates: {},
+      };
+      room.stateLoaded = false;
+      room.state.storage.get = async (key) =>
+        key === "participantConnectionEpochs" ? { [participantKey]: 2 } : null;
+      room.state.getWebSockets = () =>
+        staleFirst ? [staleWs, currentWs] : [currentWs, staleWs];
+
+      await room.loadDurableState();
+      const currentSession = room.sessions.get(currentWs);
+      const staleSession = staleWs.attachment;
+
+      assert.equal(room.sessions.has(staleWs), false);
+      assert.equal(currentSession.connectionEpoch, 2);
+      assert.equal(room.participants.get(participantKey).ws, currentWs);
+      assert.equal(room.participants.get(participantKey).connectionEpoch, 2);
+      assert.equal(
+        room.isCurrentParticipantSession(staleWs, staleSession),
+        false,
+      );
+      assert.equal(
+        room.isCurrentParticipantSession(currentWs, currentSession),
+        true,
+      );
+      assert.equal(room.getConnectionMode(), "auto");
+
+      const topologyRecipients = [];
+      room.sendTopology = (ws) => topologyRecipients.push(ws);
+      room.broadcastTopology =
+        MediaRoomDO.prototype.broadcastTopology.bind(room);
+      room.broadcastTopology();
+      assert.deepEqual(topologyRecipients, [currentWs]);
+    }
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("hibernated restoration resets persisted topology when only a stale closing attachment remains", async () => {
   const room = capacityRoom();
   const staleWs = capacitySocket();
-  const currentWs = capacitySocket();
-  const participantKey = "user-1:device-1";
+  staleWs.readyState = 2;
   staleWs.attachment = {
     authenticated: true,
     userId: "user-1",
     deviceId: "device-1",
     channelId: "channel-1",
     peerId: "peer-1",
+    connectionMode: "auto",
     connectionEpoch: 1,
-    sources: [],
+    sources: ["microphone"],
     sourceStates: {},
   };
-  currentWs.attachment = {
-    authenticated: true,
-    userId: "user-1",
-    deviceId: "device-1",
-    channelId: "channel-1",
-    peerId: "peer-2",
-    connectionEpoch: 2,
-    sources: [],
-    sourceStates: {},
+  const persisted = {
+    route: {
+      kind: "sfu",
+      provider: "cloudflare-realtime",
+      epoch: 3,
+      sourceRevision: 7,
+      reason: "active",
+    },
+    epoch: 3,
+    sourceRevision: 7,
+    publicationRevision: 2,
+    roomRevision: 4,
+    publishedSources: [
+      {
+        peerId: "peer-1",
+        source: "microphone",
+        connectionEpoch: 2,
+        generation: 1,
+      },
+    ],
+    providerHealth: {
+      "cloudflare-realtime": {
+        healthy: true,
+      },
+    },
+    participantConnectionEpochs: {
+      "user-1:device-1": 2,
+    },
   };
   room.stateLoaded = false;
-  room.state.storage.get = async (key) =>
-    key === "participantConnectionEpochs" ? { [participantKey]: 2 } : null;
-  room.state.getWebSockets = () => [staleWs, currentWs];
+  room.state.storage.get = async (key) => persisted[key] ?? null;
+  room.state.getWebSockets = () => [staleWs];
 
   await room.loadDurableState();
-  const staleSession = room.sessions.get(staleWs);
-  const currentSession = room.sessions.get(currentWs);
 
-  assert.equal(staleSession.connectionEpoch, 1);
-  assert.equal(currentSession.connectionEpoch, 2);
-  assert.equal(room.participants.get(participantKey).ws, currentWs);
-  assert.equal(room.participants.get(participantKey).connectionEpoch, 2);
-  assert.equal(room.isCurrentParticipantSession(staleWs, staleSession), false);
-  assert.equal(
-    room.isCurrentParticipantSession(currentWs, currentSession),
-    true,
-  );
-
-  room.webSocketClose(staleWs, 4000, "superseded", true);
-
-  assert.equal(room.participants.get(participantKey).ws, currentWs);
-  assert.equal(
-    room.isCurrentParticipantSession(currentWs, currentSession),
-    true,
-  );
+  assert.equal(room.participants.size, 0);
+  assert.equal(room.sessions.has(staleWs), false);
+  assert.equal(room.route.kind, "local");
+  assert.equal(room.publishedSources.size, 0);
+  assert.equal(room.providerHealth.size, 0);
+  assert.deepEqual(staleWs.closeCode, {
+    code: 4000,
+    reason: "Media session superseded",
+  });
 });
 
 test("webSocketClose cleans up the participant and completes the close handshake", () => {
