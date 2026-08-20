@@ -39,6 +39,7 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   ROOM_SNAPSHOT: "room-snapshot",
   LEAVE: "leave",
   REQUEST_SNAPSHOT: "request-snapshot",
+  RECEIVER_EVIDENCE: "receiver-evidence",
 
   WELCOME: MEDIA_CONTROL_SERVER_HELLO,
   TOPOLOGY_STATE: "topology-state",
