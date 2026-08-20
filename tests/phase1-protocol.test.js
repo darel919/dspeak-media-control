@@ -10,6 +10,53 @@ import {
 import { handleRoomMessage } from "../src/media-room-messages.ts";
 import { MediaRoomDO } from "../src/MediaRoomDO.ts";
 
+test("media-control contract uses the 919 rev-5 wire family", async () => {
+  const protocol = await import("../src/protocol.js");
+  assert.equal(protocol.MEDIA_CONTROL_PROTOCOL_VERSION, 919);
+  assert.equal(protocol.MEDIA_CONTROL_CONTRACT_REVISION, 5);
+  assert.equal(protocol.MEDIA_CONTROL_CLIENT_HELLO, "hello919");
+  assert.equal(protocol.MEDIA_CONTROL_SERVER_HELLO, "hi919");
+  assert.deepEqual(Object.values(protocol.MEDIA_CONTROL_MESSAGE_TYPES), [
+    "hello919",
+    "p2p-signal",
+    "p2p-ready",
+    "media-sources",
+    "participant-voice-state",
+    "media-capabilities",
+    "codec-migration-state",
+    "participant-capabilities",
+    "p2p-qualified",
+    "p2p-failed",
+    "provider-ready",
+    "provider-failure",
+    "provider-recovering",
+    "topology-ready",
+    "topology-failed",
+    "cloudflare-request",
+    "cloudflare-publication",
+    "media-qoe",
+    "client-sfu-rtt",
+    "heartbeat",
+    "resume",
+    "state-nack",
+    "room-snapshot",
+    "leave",
+    "request-snapshot",
+    "receiver-evidence",
+    "hi919",
+    "topology-state",
+    "p2p-signal-relay",
+    "route-commit",
+    "heartbeat-ack",
+    "operation-ack",
+    "error919",
+    "provider-ticket",
+    "cloudflare-response",
+    "cloudflare-publication-available",
+    "participant-sfu-rtt",
+  ]);
+});
+
 function createTestRoom(overrides = {}) {
   const values = new Map([
     ["route", createSFURoute(SFU_PROVIDER.CLOUDFLARE_REALTIME, 1, 0, "test")],
@@ -245,6 +292,54 @@ test("Phase 1: Idempotent replay returns cached ACK with replayed flag", async (
   assert.equal(ackMsgs[1].data.operationId, "op-4");
 });
 
+test("Phase 1: MEDIA_SOURCES replay after lost final ACK is idempotent", async () => {
+  const instance = createTestRoom();
+  const ws = createMockWs();
+  const session = createMockSession({ connectionEpoch: 1 });
+  const operationId = "op-crash-boundary";
+  const message = {
+    type: MEDIA_CONTROL_MESSAGE_TYPES.MEDIA_SOURCES,
+    data: {
+      sources: ["audio"],
+      operationId,
+      connectionEpoch: 1,
+      sourceStates: {
+        audio: { generation: 1, desiredState: "active" },
+      },
+    },
+  };
+  instance.participants.set("user-1:device-1", {
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    ws,
+    sources: new Set(),
+    sourceStates: {},
+  });
+  instance.isCurrentParticipantSession = () => true;
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
+
+  await handleRoomMessage(instance, ws, session, message);
+  const firstAck = ws.messages.findLast(
+    (candidate) => candidate.type === MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+  );
+  assert.equal(firstAck.data.accepted, true);
+  const roomRevision = instance.roomRevision;
+  const sourceRevision = instance.sourceRevision;
+  const publicationCount = instance.publishedSources.size;
+  instance.operationResults.delete(`user-1:device-1:1:${operationId}`);
+  ws.messages.length = 0;
+
+  await handleRoomMessage(instance, ws, session, message);
+  const replayAck = ws.messages.findLast(
+    (candidate) => candidate.type === MEDIA_CONTROL_MESSAGE_TYPES.OPERATION_ACK,
+  );
+  assert.equal(replayAck.data.accepted, true);
+  assert.equal(instance.roomRevision, roomRevision);
+  assert.equal(instance.sourceRevision, sourceRevision);
+  assert.equal(instance.publishedSources.size, publicationCount);
+});
+
 test("Phase 1: HEARTBEAT with state mismatch returns STATE_NACK and HEARTBEAT_ACK", async () => {
   const instance = createTestRoom();
   const ws = createMockWs();
@@ -286,38 +381,6 @@ test("Phase 1: HEARTBEAT with state mismatch returns STATE_NACK and HEARTBEAT_AC
   );
   assert.ok(hbAck, "Should also receive HEARTBEAT_ACK for liveness");
 });
-
-// test("Phase 1: connection epoch is server-owned and increments per connection", async () => {
-//   const instance = createTestRoom();
-//   const ws = createMockWs();
-//   const session = createMockSession({ authenticated: true }); // Pre-authenticated for test
-//
-//   // First connection - manually set up participant (simulating post-auth state)
-//   instance.participantConnectionEpochs.clear();
-//   instance.participants.set("user-1:device-1", {
-//     userId: "user-1",
-//     deviceId: "device-1",
-//     peerId: "peer-1",
-//     ws,
-//     sources: new Set(["audio"]),
-//     connectionEpoch: 1,
-//   });
-//   instance.isCurrentParticipantSession = () => true;
-//
-//   // Trigger getSession to increment epoch
-//   instance.getSession(ws);
-//
-//   // Server should have assigned epoch 1
-//   assert.equal(instance.participantConnectionEpochs.get("user-1:device-1"), 1);
-//
-//   // Simulate reconnect - epoch should increment
-//   const ws2 = createMockWs();
-//   const session2 = createMockSession({ authenticated: true, mediaSessionId: "test-session-2" });
-//
-//   instance.getSession(ws2);
-//
-//   assert.equal(instance.participantConnectionEpochs.get("user-1:device-1"), 2, "Epoch should increment on reconnect");
-// });
 
 test("Phase 1: roomRevision is BigInt, string comparison used consistently", async () => {
   const instance = createTestRoom();

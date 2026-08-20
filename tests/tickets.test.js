@@ -52,6 +52,7 @@ function capacityRoom() {
 function capacitySocket() {
   return {
     messages: [],
+    attachment: null,
     closeCode: null,
     send(message) {
       this.messages.push(JSON.parse(message));
@@ -59,7 +60,12 @@ function capacitySocket() {
     close(code, reason) {
       this.closeCode = { code, reason };
     },
-    serializeAttachment() {},
+    serializeAttachment(value) {
+      this.attachment = value;
+    },
+    deserializeAttachment() {
+      return this.attachment;
+    },
   };
 }
 
@@ -87,6 +93,32 @@ async function authenticateParticipant(room, index, connectionMode) {
   });
   return { session, ws };
 }
+
+test("genuine participant reconnects advance the server-owned connection epoch", async () => {
+  const room = capacityRoom();
+  const first = await authenticateParticipant(room, 1, "auto");
+  const second = await authenticateParticipant(room, 1, "auto");
+
+  assert.equal(first.session.connectionEpoch, 1);
+  assert.equal(second.session.connectionEpoch, 2);
+  assert.deepEqual(first.ws.closeCode, {
+    code: 4000,
+    reason: "Media session superseded",
+  });
+  assert.equal(room.participants.size, 1);
+});
+
+test("same-WebSocket hibernation restoration keeps the connection epoch", async () => {
+  const room = capacityRoom();
+  const first = await authenticateParticipant(room, 1, "auto");
+  room.sessions.delete(first.ws);
+
+  const restored = room.getSession(first.ws);
+
+  assert.equal(restored.connectionEpoch, first.session.connectionEpoch);
+  assert.equal(room.participantConnectionEpochs.get("user-1:device-1"), 1);
+  assert.equal(room.participants.get("user-1:device-1").ws, first.ws);
+});
 
 function baseClaims() {
   return {

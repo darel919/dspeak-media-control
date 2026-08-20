@@ -768,9 +768,6 @@ export async function handleRoomMessage(room, ws, session, envelope) {
     case MEDIA_CONTROL_MESSAGE_TYPES.CLIENT_SFU_RTT:
       relayClientSfuRtt(room, ws, session, data);
       break;
-    case MEDIA_CONTROL_MESSAGE_TYPES.RECEIVER_EVIDENCE:
-      await handleReceiverEvidence(room, ws, session, data);
-      break;
     case MEDIA_CONTROL_MESSAGE_TYPES.PROVIDER_READY:
       await handleProviderReady(room, ws, session, data);
       break;
@@ -1191,53 +1188,6 @@ async function handleTopologyReady(room, session, data) {
     return;
   room.transitionReadiness.add(session.peerId);
   await room.maybeCommitPendingRoute();
-}
-
-async function handleReceiverEvidence(room, ws, session, data) {
-  // Validate message structure
-  const participant = room.participants.get(
-    `${session.userId}:${session.deviceId}`,
-  );
-  if (!participant) return;
-
-  const peerId = String(data?.peerId || "");
-  const source = String(data?.source || "");
-  const kind = String(data?.kind || "");
-  const incarnationId = String(data?.incarnationId || "");
-  const evidence = data?.evidence || {};
-
-  if (!peerId || !source || !kind || !incarnationId) {
-    return;
-  }
-
-  // Find the remote participant who is the publisher
-  const publisher = [...room.participants.values()].find(
-    (p) => p.peerId === peerId,
-  );
-  if (!publisher) return;
-
-  // Validate the incarnation matches the current canonical state
-  const publisherSources = publisher.sourceStates?.[source];
-  if (!publisherSources) return;
-
-  // Only forward evidence for active sources
-  if (publisherSources.desiredState !== "active") return;
-
-  // Forward to the publisher so they know their stream is being received
-  if (publisher.ws) {
-    room.sendMessage(
-      publisher.ws,
-      MEDIA_CONTROL_MESSAGE_TYPES.RECEIVER_EVIDENCE,
-      {
-        receiverPeerId: session.peerId,
-        receiverUserId: session.userId,
-        source,
-        kind,
-        incarnationId,
-        evidence,
-      },
-    );
-  }
 }
 
 function matchesProviderIdentity(route, data) {
