@@ -72,6 +72,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
 function isRoomRoute(value: unknown): value is RoomRoute {
   if (!isRecord(value)) return false;
   return (
@@ -179,7 +183,8 @@ export class MediaRoomDO {
     if (url.pathname.endsWith("/participants") && request.method === "GET")
       return Response.json({ participants: this.getParticipantList() });
     if (url.pathname.endsWith("/moderate") && request.method === "POST") {
-      const data = (await request.json()) as DynamicRecord;
+      const parsed: unknown = await request.json();
+      const data: DynamicRecord = isRecord(parsed) ? parsed : {};
       const matches = [...this.participants.values()].filter(
         (participant) => participant.userId === String(data.userId || ""),
       );
@@ -271,11 +276,14 @@ export class MediaRoomDO {
     const session = this.getSession(ws);
     if (!session) return;
     try {
-      const data = JSON.parse(
+      const parsed: unknown = JSON.parse(
         typeof message === "string"
           ? message
           : new TextDecoder().decode(message),
       );
+      if (!isRecord(parsed))
+        throw new Error("Message envelope must be an object");
+      const data: DynamicRecord = parsed;
       mediaDebug(this.env, "room.message", {
         type: data?.type,
         authenticated: session?.authenticated === true,
@@ -296,9 +304,24 @@ export class MediaRoomDO {
     }
   }
 
-  webSocketClose(ws: CloudflareWebSocket) {
-    const session = this.getSession(ws);
-    if (session) this.handleDisconnect(ws, session);
+  webSocketClose(
+    ws: CloudflareWebSocket,
+    code: number,
+    reason: string,
+    _wasClean: boolean,
+  ) {
+    try {
+      const session = this.getSession(ws);
+      if (session) this.handleDisconnect(ws, session);
+    } finally {
+      try {
+        ws.close(code, reason);
+      } catch {
+        try {
+          ws.close();
+        } catch {}
+      }
+    }
   }
 
   webSocketError(ws: CloudflareWebSocket) {
@@ -451,15 +474,12 @@ export class MediaRoomDO {
     if (typeof qualificationParticipantSignature === "string")
       this.qualificationParticipantSignature =
         qualificationParticipantSignature;
-    if (
-      participantConnectionEpochs &&
-      typeof participantConnectionEpochs === "object"
-    ) {
+    if (isRecord(participantConnectionEpochs)) {
       this.participantConnectionEpochs = new Map(
-        Object.entries(participantConnectionEpochs).map(([key, value]) => [
-          key,
-          Number(value),
-        ]),
+        Object.entries(participantConnectionEpochs).flatMap(([key, value]) => {
+          const epoch = Number(value);
+          return isPositiveSafeInteger(epoch) ? [[key, epoch]] : [];
+        }),
       );
     } else {
       this.participantConnectionEpochs = new Map();
@@ -584,15 +604,29 @@ export class MediaRoomDO {
     if (restored.authenticated) {
       const participantKey = `${restored.userId}:${restored.deviceId}`;
       const previousParticipant = this.participants.get(participantKey);
-      if (!previousParticipant?.ws || previousParticipant.ws === ws) {
-        // Hibernation: preserve existing epoch, don't increment
-        // Prefer the map, fall back to the restored attachment's own epoch
-        const restoredEpoch = Number(restored.connectionEpoch);
-        const connectionEpoch = Number.isSafeInteger(restoredEpoch)
-          ? restoredEpoch
-          : (this.participantConnectionEpochs?.get(participantKey) ?? 1);
-        if (!this.participantConnectionEpochs.has(participantKey))
+      const restoredEpoch = Number(restored.connectionEpoch);
+      const canonicalEpochValue =
+        this.participantConnectionEpochs.get(participantKey);
+      const canonicalEpoch = isPositiveSafeInteger(canonicalEpochValue)
+        ? canonicalEpochValue
+        : undefined;
+      const hasRestoredEpoch = isPositiveSafeInteger(restoredEpoch);
+      const staleRestoredEpoch =
+        canonicalEpoch !== undefined &&
+        (!hasRestoredEpoch || restoredEpoch !== canonicalEpoch);
+      if (
+        !staleRestoredEpoch &&
+        (!previousParticipant?.ws || previousParticipant.ws === ws)
+      ) {
+        const connectionEpoch =
+          canonicalEpoch ?? (hasRestoredEpoch ? restoredEpoch : 1);
+        if (canonicalEpoch === undefined) {
           this.participantConnectionEpochs.set(participantKey, connectionEpoch);
+          void this.state.storage.put(
+            "participantConnectionEpochs",
+            Object.fromEntries(this.participantConnectionEpochs),
+          );
+        }
         this.participants.set(participantKey, {
           userId: restored.userId,
           deviceId: restored.deviceId,
@@ -743,14 +777,23 @@ export class MediaRoomDO {
 
   isCurrentParticipantSession(ws: CloudflareWebSocket, session: RoomSession) {
     if (!session?.authenticated) return false;
-    const participant = this.participants.get(
-      `${session.userId}:${session.deviceId}`,
-    );
+    const participantKey = `${session.userId}:${session.deviceId}`;
+    const participant = this.participants.get(participantKey);
     if (!participant) return false;
     const registered = this.sessions.get(ws);
+    const canonicalEpoch = this.participantConnectionEpochs.get(participantKey);
+    const sessionEpoch = Number(session.connectionEpoch);
+    const participantEpoch = Number(participant.connectionEpoch);
+    const hasCurrentEpoch =
+      isPositiveSafeInteger(canonicalEpoch) &&
+      isPositiveSafeInteger(sessionEpoch) &&
+      isPositiveSafeInteger(participantEpoch) &&
+      sessionEpoch === participantEpoch &&
+      participantEpoch === canonicalEpoch;
     return (
       participant?.ws === ws &&
       participant.peerId === session.peerId &&
+      hasCurrentEpoch &&
       (!registered || registered === session)
     );
   }

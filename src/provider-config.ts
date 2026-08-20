@@ -23,7 +23,7 @@ export function isCloudflareRealtimeConfigured(env: MediaControlEnv) {
 }
 
 export function configuredSfuProviders(env: MediaControlEnv) {
-  const providers = new Set();
+  const providers = new Set<string>();
   if (isCloudflareRealtimeConfigured(env))
     providers.add(SFU_PROVIDER.CLOUDFLARE_REALTIME);
   if (isSelfHostedMediasoupConfigured(env))

@@ -23,6 +23,10 @@ export const QOE_REPORT_MAX_AGE_MS = 30_000;
 export const MAX_QOE_REPORTS_PER_PARTICIPANT = 16;
 export const MAX_QOE_PROVIDER_ID_LENGTH = 128;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 export function providerHealthKey(
   provider: string,
   providerId: string | null = null,
@@ -329,7 +333,8 @@ export async function handleCloudflareRequest(
     sendResult({ error: "Cloudflare Realtime request failed" });
     return;
   }
-  const result = (await response.json().catch(() => ({}))) as DynamicRecord;
+  const parsedResult: unknown = await response.json().catch(() => ({}));
+  const result: DynamicRecord = isRecord(parsedResult) ? parsedResult : {};
   if (response.ok && operation === "new-session" && result.sessionId) {
     session.cloudflareSessionId = result.sessionId;
     // Also update the participant record so reconnect preserves it
@@ -648,7 +653,10 @@ export async function beginTransition(
         }),
       );
       if (response.ok) {
-        const selection = (await response.json()) as DynamicRecord;
+        const parsedSelection: unknown = await response.json();
+        const selection: DynamicRecord = isRecord(parsedSelection)
+          ? parsedSelection
+          : {};
         selectedProvider = selection.route?.provider || selectedProvider;
         selectedProviderConfig = selection.provider || null;
         selectedProviderId =

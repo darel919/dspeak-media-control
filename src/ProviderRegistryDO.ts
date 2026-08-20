@@ -5,6 +5,10 @@ import { mediaDebug } from "./debug.ts";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import type { DynamicRecord, MediaControlEnv } from "./domain-types.ts";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 export class ProviderRegistryDO {
   state: DurableObjectState;
   env: MediaControlEnv;
@@ -57,7 +61,8 @@ export class ProviderRegistryDO {
         }),
         { status: 503 },
       );
-    const data = (await request.json()) as DynamicRecord;
+    const parsed: unknown = await request.json();
+    const data: DynamicRecord = isRecord(parsed) ? parsed : {};
     const {
       providerId,
       signalingUrl,
@@ -132,7 +137,8 @@ export class ProviderRegistryDO {
         }),
         { status: 503 },
       );
-    const data = (await request.json()) as DynamicRecord;
+    const parsed: unknown = await request.json();
+    const data: DynamicRecord = isRecord(parsed) ? parsed : {};
     const {
       roomId,
       connectionMode,
@@ -182,7 +188,7 @@ export class ProviderRegistryDO {
     }
 
     const rankedQoe = rankQoeCandidates(
-      qoeCandidates.filter(
+      (Array.isArray(qoeCandidates) ? qoeCandidates : []).filter(
         (candidate: DynamicRecord) =>
           Number(candidate.readyParticipants) >=
             Number(candidate.requiredParticipants) &&
@@ -198,7 +204,7 @@ export class ProviderRegistryDO {
       ),
     );
     const qoeProvider = rankedQoe[0]?.provider;
-    if (qoeProvider) {
+    if (typeof qoeProvider === "string") {
       const provider = selectProviderInstance(
         candidates,
         qoeProvider,
@@ -265,7 +271,8 @@ export class ProviderRegistryDO {
   async handleReportFailure(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
-    const data = (await request.json()) as DynamicRecord;
+    const parsed: unknown = await request.json();
+    const data: DynamicRecord = isRecord(parsed) ? parsed : {};
     const { providerId, error, correlated } = data;
 
     const cb = this.circuitBreakers.get(providerId);
@@ -297,7 +304,8 @@ export class ProviderRegistryDO {
   async handleReportSuccess(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
-    const data = (await request.json()) as DynamicRecord;
+    const parsed: unknown = await request.json();
+    const data: DynamicRecord = isRecord(parsed) ? parsed : {};
     const providerId = String(data.providerId || "");
     const cb = this.circuitBreakers.get(providerId);
     const provider = this.providers.get(providerId);

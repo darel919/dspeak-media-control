@@ -392,6 +392,7 @@ test("client SFU RTT is relayed without generating an error response", async () 
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.participants.clear();
   instance.participants.set("user-1:device-1", {
@@ -399,7 +400,9 @@ test("client SFU RTT is relayed without generating an error response", async () 
     deviceId: "device-1",
     peerId: "peer-1",
     ws: sender,
+    connectionEpoch: 1,
   });
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-2:device-2", {
     userId: "user-2",
     deviceId: "device-2",
@@ -442,15 +445,19 @@ test("P2P signal relay preserves the browser envelope and rejects stale epochs",
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   const recipientSession = {
     authenticated: true,
     userId: "user-2",
     deviceId: "device-2",
     peerId: "peer-2",
+    connectionEpoch: 1,
   };
   instance.sessions.set(sender, senderSession);
   instance.sessions.set(recipient, recipientSession);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
+  instance.participantConnectionEpochs.set("user-2:device-2", 1);
   instance.participants.set("user-1:device-1", {
     ...senderSession,
     ws: sender,
@@ -580,10 +587,12 @@ test("native P2P readiness uses the shared qualification protocol", async () => 
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.clear();
   instance.participants.clear();
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", {
     ...session,
     ws,
@@ -968,10 +977,12 @@ test("stale topology failures cannot cancel a refreshed transition", async () =>
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.clear();
   instance.participants.clear();
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", { ...session, ws });
   instance.pendingRoute = createSFURoute(
     SFU_PROVIDER.CLOUDFLARE_REALTIME,
@@ -1002,10 +1013,12 @@ test("readiness and failures must identify the concrete pending provider", async
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.clear();
   instance.participants.clear();
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", {
     ...session,
     ws,
@@ -1363,10 +1376,12 @@ test("room forwards concrete QoE identity to registry selection", async () => {
     channelId: "channel-1",
     peerId: "peer-1",
     connectionMode: "auto",
+    connectionEpoch: 1,
   };
   instance.participants.clear();
   instance.sessions.clear();
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", {
     ...session,
     ws,
@@ -1415,8 +1430,10 @@ test("room bounds per-participant QoE instance reports", async () => {
     deviceId: "device-1",
     channelId: "channel-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", {
     ...session,
     ws,
@@ -1718,8 +1735,10 @@ test("a failed qualification fallback is invalidated using its own route epoch",
     deviceId: "device-1",
     channelId: "channel-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.clear();
   instance.participants.set("user-1:device-1", {
     ...session,
@@ -1771,10 +1790,12 @@ test("stale P2P failure and qualification messages cannot change the active rout
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.clear();
   instance.participants.clear();
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", {
     ...session,
     ws,
@@ -1808,10 +1829,12 @@ test("provider and topology readiness reject stale source revisions", async () =
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
+    connectionEpoch: 1,
   };
   instance.sessions.clear();
   instance.participants.clear();
   instance.sessions.set(ws, session);
+  instance.participantConnectionEpochs.set("user-1:device-1", 1);
   instance.participants.set("user-1:device-1", { ...session, ws });
   instance.pendingRoute = createSFURoute(
     SFU_PROVIDER.MEDIASOUP,

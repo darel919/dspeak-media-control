@@ -12,6 +12,10 @@ const CODEC_EFFICIENCIES = new Set([
 ]);
 const CODEC_POWER_CLASSES = new Set(["low", "medium", "high"]);
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 type CodecDirection = {
   supported: boolean;
   acceleration: string;
@@ -151,28 +155,35 @@ export function normalizeMediaCapabilities(
   value: unknown,
 ): NormalizedMediaCapabilities | null {
   if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, any>;
-  const diagnostics =
-    record.videoCodecDiagnostics &&
-    typeof record.videoCodecDiagnostics === "object"
-      ? record.videoCodecDiagnostics
-      : record;
+  const record = isRecord(value) ? value : {};
+  const diagnostics = isRecord(record.videoCodecDiagnostics)
+    ? record.videoCodecDiagnostics
+    : record;
   const rawCodecs =
-    record.videoCodecs ||
-    record.videoCodecCapabilities ||
-    diagnostics.videoCodecs ||
-    diagnostics.capabilities ||
+    (isRecord(record.videoCodecs) && record.videoCodecs) ||
+    (isRecord(record.videoCodecCapabilities) &&
+      record.videoCodecCapabilities) ||
+    (isRecord(diagnostics.videoCodecs) && diagnostics.videoCodecs) ||
+    (isRecord(diagnostics.capabilities) && diagnostics.capabilities) ||
     {};
   const videoCodecs: NormalizedMediaCapabilities["videoCodecs"] = {};
   for (const codec of VIDEO_CODECS) {
-    const candidate = rawCodecs[codec] || rawCodecs[codec.toLowerCase()] || {};
+    const rawCandidate = rawCodecs[codec];
+    const rawLowerCandidate = rawCodecs[codec.toLowerCase()];
+    const candidate: Record<string, unknown> = isRecord(rawCandidate)
+      ? rawCandidate
+      : isRecord(rawLowerCandidate)
+        ? rawLowerCandidate
+        : {};
     videoCodecs[codec] = {
       encode: normalizeCodecDirection(candidate.encode),
       decode: normalizeCodecDirection(candidate.decode),
     };
   }
   const rawConcurrent =
-    record.concurrentEncode || diagnostics.concurrentEncode || {};
+    (isRecord(record.concurrentEncode) && record.concurrentEncode) ||
+    (isRecord(diagnostics.concurrentEncode) && diagnostics.concurrentEncode) ||
+    {};
   const concurrentEncode: ConcurrentEncode = {
     supported: rawConcurrent.supported === true,
   };
@@ -217,7 +228,9 @@ export function normalizeMediaCapabilities(
   return result;
 }
 
-export function mediaPublicationKey(publication: Record<string, any>): string {
+export function mediaPublicationKey(
+  publication: Record<string, unknown>,
+): string {
   const peerId = String(publication?.peerId || "");
   const logicalStreamId = String(
     publication?.logicalStreamId || publication?.source || "",

@@ -1,4 +1,70 @@
-export function normalizeQoePath(path: any) {
+type QoePath = {
+  rttMs?: unknown;
+  rtt?: unknown;
+  jitterMs?: unknown;
+  jitter?: unknown;
+  packetLossFraction?: unknown;
+  fractionLost?: unknown;
+  packetLossPercent?: unknown;
+  packetLoss?: unknown;
+  jitterBufferDelayMs?: unknown;
+  jitterBufferDelay?: unknown;
+  concealedAudioRatio?: unknown;
+  candidateType?: unknown;
+  protocol?: unknown;
+  availableBitrateBps?: unknown;
+  [key: string]: unknown;
+};
+
+type NormalizedQoePath = {
+  rttMs: number | null;
+  jitterMs: number | null;
+  packetLossPercent: number | null;
+  jitterBufferDelayMs: number | null;
+  concealedAudioRatio: number | null;
+  candidateType: string | null;
+  protocol: string | null;
+  availableBitrateBps: number | null;
+};
+
+type QoeCandidate = {
+  paths?: QoePath[];
+  viable?: boolean;
+  requiredParticipants?: unknown;
+  readyParticipants?: unknown;
+  infrastructureCost?: unknown;
+  failed?: boolean;
+  stableSince?: unknown;
+  qoeScore?: unknown;
+  worstLatencyMs?: unknown;
+  [key: string]: unknown;
+};
+
+type ScoredQoeCandidate = Omit<
+  QoeCandidate,
+  | "paths"
+  | "viable"
+  | "worstLatencyMs"
+  | "worstLossPercent"
+  | "worstJitterMs"
+  | "p95QoeScore"
+  | "qoeScore"
+> & {
+  paths: NormalizedQoePath[];
+  viable: boolean;
+  worstLatencyMs: number;
+  worstLossPercent: number;
+  worstJitterMs: number;
+  p95QoeScore: number;
+  qoeScore: number;
+};
+
+function isRecord(value: unknown): value is QoePath {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+export function normalizeQoePath(path: unknown): NormalizedQoePath {
+  const record = isRecord(path) ? path : {};
   const normalizeMilliseconds = (value: unknown) => {
     if (value == null || value === "") return null;
     const number = Number(value);
@@ -14,43 +80,44 @@ export function normalizeQoePath(path: any) {
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
   };
-  const packetLossFraction = path?.packetLossFraction ?? path?.fractionLost;
+  const packetLossFraction = record.packetLossFraction ?? record.fractionLost;
   const packetLossPercent =
     packetLossFraction == null
-      ? normalizePercent(path?.packetLossPercent ?? path?.packetLoss)
+      ? normalizePercent(record.packetLossPercent ?? record.packetLoss)
       : Number(packetLossFraction) * 100;
   return {
     rttMs:
-      path?.rttMs == null
-        ? normalizeSecondsToMilliseconds(path?.rtt)
-        : normalizeMilliseconds(path.rttMs),
+      record.rttMs == null
+        ? normalizeSecondsToMilliseconds(record.rtt)
+        : normalizeMilliseconds(record.rttMs),
     jitterMs:
-      path?.jitterMs == null
-        ? normalizeSecondsToMilliseconds(path?.jitter)
-        : normalizeMilliseconds(path.jitterMs),
+      record.jitterMs == null
+        ? normalizeSecondsToMilliseconds(record.jitter)
+        : normalizeMilliseconds(record.jitterMs),
     packetLossPercent,
     jitterBufferDelayMs:
-      path?.jitterBufferDelayMs == null
-        ? normalizeSecondsToMilliseconds(path?.jitterBufferDelay)
-        : normalizeMilliseconds(path.jitterBufferDelayMs),
+      record.jitterBufferDelayMs == null
+        ? normalizeSecondsToMilliseconds(record.jitterBufferDelay)
+        : normalizeMilliseconds(record.jitterBufferDelayMs),
     concealedAudioRatio:
-      path?.concealedAudioRatio == null || path?.concealedAudioRatio === ""
+      record.concealedAudioRatio == null || record.concealedAudioRatio === ""
         ? null
-        : Number.isFinite(Number(path.concealedAudioRatio))
-          ? Number(path.concealedAudioRatio)
+        : Number.isFinite(Number(record.concealedAudioRatio))
+          ? Number(record.concealedAudioRatio)
           : null,
-    candidateType: path?.candidateType || null,
-    protocol: path?.protocol || null,
+    candidateType:
+      typeof record.candidateType === "string" ? record.candidateType : null,
+    protocol: typeof record.protocol === "string" ? record.protocol : null,
     availableBitrateBps:
-      path?.availableBitrateBps == null || path?.availableBitrateBps === ""
+      record.availableBitrateBps == null || record.availableBitrateBps === ""
         ? null
-        : Number.isFinite(Number(path.availableBitrateBps))
-          ? Math.max(0, Number(path.availableBitrateBps))
+        : Number.isFinite(Number(record.availableBitrateBps))
+          ? Math.max(0, Number(record.availableBitrateBps))
           : null,
   };
 }
 
-function scorePath(path: any) {
+function scorePath(path: NormalizedQoePath) {
   if (path.rttMs == null) return Number.POSITIVE_INFINITY;
   return (
     path.rttMs / 2 +
@@ -71,9 +138,11 @@ function percentile(values: number[], fraction: number) {
   return sorted[index];
 }
 
-export function scoreQoeCandidate(candidate: any) {
-  const paths = (candidate?.paths || []).map(normalizeQoePath);
-  const latency = paths.map((path: any) => {
+export function scoreQoeCandidate(candidate: QoeCandidate): ScoredQoeCandidate {
+  const paths = (Array.isArray(candidate.paths) ? candidate.paths : []).map(
+    normalizeQoePath,
+  );
+  const latency = paths.map((path) => {
     if (path.rttMs == null) return Number.POSITIVE_INFINITY;
     return (
       path.rttMs / 2 +
@@ -101,18 +170,18 @@ export function scoreQoeCandidate(candidate: any) {
       : Number.POSITIVE_INFINITY,
     worstLossPercent: Math.max(
       0,
-      ...finite(paths.map((path: any) => path.packetLossPercent ?? 0)),
+      ...finite(paths.map((path) => path.packetLossPercent ?? 0)),
     ),
     worstJitterMs: Math.max(
       0,
-      ...finite(paths.map((path: any) => path.jitterMs ?? 0)),
+      ...finite(paths.map((path) => path.jitterMs ?? 0)),
     ),
     p95QoeScore: percentile(finiteQualityScores, 0.95),
     qoeScore: worstQoeScore,
   };
 }
 
-export function rankQoeCandidates(candidates: any[]) {
+export function rankQoeCandidates(candidates: QoeCandidate[]) {
   return candidates.map(scoreQoeCandidate).sort((left, right) => {
     const leftTuple = [
       left.viable ? 0 : 1,
@@ -138,8 +207,13 @@ export function rankQoeCandidates(candidates: any[]) {
   });
 }
 
-export function qoeWouldImprove(active: any, candidate: any, now = Date.now()) {
+export function qoeWouldImprove(
+  active: QoeCandidate | null | undefined,
+  candidate: QoeCandidate,
+  now = Date.now(),
+) {
   if (!candidate?.viable) return false;
+  if (!active) return false;
   if (active?.failed) return true;
   if (
     active?.viable === false &&

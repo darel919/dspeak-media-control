@@ -175,6 +175,8 @@ identities are ignored as stale messages.
 
 ```bash
 npm run test        # node --test
+npm run typecheck
+npm run test:workers
 npm run format      # prettier --write
 npm run format:check
 ```

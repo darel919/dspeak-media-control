@@ -59,6 +59,7 @@ function capacitySocket() {
     },
     close(code, reason) {
       this.closeCode = { code, reason };
+      if (this.throwOnClose) throw new Error("close failed");
     },
     serializeAttachment(value) {
       this.attachment = value;
@@ -118,6 +119,112 @@ test("same-WebSocket hibernation restoration keeps the connection epoch", async 
   assert.equal(restored.connectionEpoch, first.session.connectionEpoch);
   assert.equal(room.participantConnectionEpochs.get("user-1:device-1"), 1);
   assert.equal(room.participants.get("user-1:device-1").ws, first.ws);
+});
+
+test("hibernated restoration fences an older attachment behind the canonical epoch", async () => {
+  const room = capacityRoom();
+  const staleWs = capacitySocket();
+  const currentWs = capacitySocket();
+  const participantKey = "user-1:device-1";
+  staleWs.attachment = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    channelId: "channel-1",
+    peerId: "peer-1",
+    connectionEpoch: 1,
+    sources: [],
+    sourceStates: {},
+  };
+  currentWs.attachment = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    channelId: "channel-1",
+    peerId: "peer-2",
+    connectionEpoch: 2,
+    sources: [],
+    sourceStates: {},
+  };
+  room.stateLoaded = false;
+  room.state.storage.get = async (key) =>
+    key === "participantConnectionEpochs" ? { [participantKey]: 2 } : null;
+  room.state.getWebSockets = () => [staleWs, currentWs];
+
+  await room.loadDurableState();
+  const staleSession = room.sessions.get(staleWs);
+  const currentSession = room.sessions.get(currentWs);
+
+  assert.equal(staleSession.connectionEpoch, 1);
+  assert.equal(currentSession.connectionEpoch, 2);
+  assert.equal(room.participants.get(participantKey).ws, currentWs);
+  assert.equal(room.participants.get(participantKey).connectionEpoch, 2);
+  assert.equal(room.isCurrentParticipantSession(staleWs, staleSession), false);
+  assert.equal(
+    room.isCurrentParticipantSession(currentWs, currentSession),
+    true,
+  );
+
+  room.webSocketClose(staleWs, 4000, "superseded", true);
+
+  assert.equal(room.participants.get(participantKey).ws, currentWs);
+  assert.equal(
+    room.isCurrentParticipantSession(currentWs, currentSession),
+    true,
+  );
+});
+
+test("webSocketClose cleans up the participant and completes the close handshake", () => {
+  const room = capacityRoom();
+  const ws = capacitySocket();
+  const participantKey = "user-1:device-1";
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    connectionEpoch: 1,
+  };
+  room.sessions.set(ws, session);
+  room.participantConnectionEpochs.set(participantKey, 1);
+  room.participants.set(participantKey, {
+    ...session,
+    ws,
+    status: "connected",
+  });
+
+  room.webSocketClose(ws, 1000, "client closed", true);
+
+  assert.equal(room.sessions.has(ws), false);
+  assert.equal(room.participants.get(participantKey).ws, null);
+  assert.deepEqual(ws.closeCode, { code: 1000, reason: "client closed" });
+});
+
+test("webSocketClose keeps cleanup when the close reply throws", () => {
+  const room = capacityRoom();
+  const ws = capacitySocket();
+  const participantKey = "user-1:device-1";
+  const session = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    peerId: "peer-1",
+    connectionEpoch: 1,
+  };
+  ws.throwOnClose = true;
+  room.sessions.set(ws, session);
+  room.participantConnectionEpochs.set(participantKey, 1);
+  room.participants.set(participantKey, {
+    ...session,
+    ws,
+    status: "connected",
+  });
+
+  assert.doesNotThrow(() =>
+    room.webSocketClose(ws, 1006, "network error", false),
+  );
+  assert.equal(room.sessions.has(ws), false);
+  assert.equal(room.participants.get(participantKey).ws, null);
 });
 
 function baseClaims() {

@@ -48,9 +48,20 @@ This document specifies the media transport protocol (version 919, contract revi
 
 - **Server-owned, per-participant**: Assigned on attach, incremented on reattach
 - **Persisted**: In DO durable storage across hibernation
+- **Canonical during restoration**: The persisted participant epoch fences every
+  restored attachment; an older superseded attachment cannot become authoritative
+- **Session validation**: Current-session checks require matching session,
+  participant, and persisted epochs
 - **Never client-controlled**: Client never sends epoch in hello
 - **Scoped**: All state mutations require current epoch
 - **Included in**: `hi919`, `operation-ack` (for MEDIA_SOURCES), publication identity
+
+## WebSocket Close Lifecycle
+
+The Durable Object removes the closing socket from its live session map and
+marks the participant disconnected before replying to the close event with the
+received close code and reason. The reply is explicit because this Worker keeps
+its compatibility date before Cloudflare's automatic close-reply behavior.
 
 ## Source Generation Tracking
 
