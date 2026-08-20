@@ -394,12 +394,14 @@ export class MediaRoomDO {
       providerConfig ||
       providerHealth,
     );
+    const hasReplayableOperation = this.operationResults.size > 0;
     const sockets = this.state.getWebSockets?.() || [];
     for (const ws of sockets) this.getSession(ws);
     if (
       hasPersistedRoomState &&
       !sockets.length &&
-      this.participants.size === 0
+      this.participants.size === 0 &&
+      !hasReplayableOperation
     )
       await this.resetDormantRoomState();
     this.stateLoaded = true;

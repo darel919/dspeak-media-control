@@ -33,18 +33,18 @@ function createSession(connectionEpoch: number) {
   };
 }
 
-function createParticipant(connectionEpoch: number) {
+function createParticipant(connectionEpoch: number, active = false) {
   return {
     userId: "user-1",
     deviceId: "device-1",
     peerId: "peer-1",
     ws: null,
-    sources: new Set<string>(["audio"]),
+    sources: new Set<string>(active ? ["audio"] : []),
     sourceStates: {
       audio: {
-        generation: 1,
-        desiredState: "active",
-        publicationState: "announced",
+        generation: active ? 1 : 0,
+        desiredState: active ? "active" : "inactive",
+        publicationState: active ? "announced" : "unpublished",
         provider: null,
       },
     },
@@ -84,11 +84,19 @@ describe("MediaRoomDO Durable Object reconstruction", () => {
         sourceRevision: instance.sourceRevision,
         publicationRevision: instance.publicationRevision,
         publishedSources: instance.publishedSources.size,
+        sourceState:
+          instance.participants.get(participantKey)?.sourceStates?.audio,
       };
     });
 
     expect(first.ack?.type).toBe("operation-ack");
     expect(first.ack?.data.accepted).toBe(true);
+    expect(first.sourceRevision).toBeGreaterThan(0);
+    expect(BigInt(first.roomRevision)).toBeGreaterThan(0n);
+    expect(first.sourceState).toMatchObject({
+      generation: 1,
+      desiredState: "active",
+    });
     await evictDurableObject(stub, { webSockets: "close" });
 
     const replay = await runInDurableObject(stub, async (instance) => {
@@ -107,6 +115,16 @@ describe("MediaRoomDO Durable Object reconstruction", () => {
     });
 
     expect(replay.ack?.data.replayed).toBe(true);
+    expect(
+      replay.ack?.data.canonicalState?.sourceStates?.[participantKey],
+    ).toEqual(
+      expect.objectContaining({
+        audio: expect.objectContaining({
+          generation: 1,
+          desiredState: "active",
+        }),
+      }),
+    );
     expect(replay.roomRevision).toBe(first.roomRevision);
     expect(replay.sourceRevision).toBe(first.sourceRevision);
     expect(replay.publicationRevision).toBe(first.publicationRevision);
@@ -148,7 +166,7 @@ describe("MediaRoomDO Durable Object reconstruction", () => {
     await evictDurableObject(stub, { webSockets: "close" });
 
     const replay = await runInDurableObject(stub, async (instance) => {
-      instance.participants.set(participantKey, createParticipant(2));
+      instance.participants.set(participantKey, createParticipant(2, true));
       instance.participantConnectionEpochs.set(participantKey, 2);
       instance.isCurrentParticipantSession = () => true;
       const ws = createWs();
