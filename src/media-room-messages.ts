@@ -26,8 +26,11 @@ import {
 } from "./media-room-provider.ts";
 import { mediaDebug } from "./debug.ts";
 import { normalizeQoePath } from "./qoe.ts";
+import type { JWTPayload } from "jose";
+import type { WebSocket as CloudflareWebSocket } from "@cloudflare/workers-types";
+import type { DynamicRecord, RoomPublication } from "./domain-types.ts";
 
-function participantCapabilityPayload(participant) {
+function participantCapabilityPayload(participant: DynamicRecord) {
   if (!participant) return null;
   const mediaCapabilities =
     participant.mediaCapabilities ||
@@ -47,9 +50,9 @@ function participantCapabilityPayload(participant) {
 }
 
 function broadcastParticipantCapabilities(
-  room,
-  participant,
-  excludedWs = null,
+  room: DynamicRecord,
+  participant: DynamicRecord,
+  excludedWs: CloudflareWebSocket | null = null,
 ) {
   const payload = participantCapabilityPayload(participant);
   if (!payload) return false;
@@ -63,7 +66,12 @@ function broadcastParticipantCapabilities(
   return true;
 }
 
-export async function handleRoomMessage(room, ws, session, envelope) {
+export async function handleRoomMessage(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  envelope: DynamicRecord,
+) {
   const data =
     envelope?.data && typeof envelope.data === "object"
       ? envelope.data
@@ -189,7 +197,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         typeof data.localSourceDigest === "object"
       ) {
         const participantSourceStates = participant?.sourceStates || {};
-        for (const [source, digest] of Object.entries(data.localSourceDigest)) {
+        const localSourceDigest = data.localSourceDigest as Record<
+          string,
+          DynamicRecord
+        >;
+        for (const [source, digest] of Object.entries(localSourceDigest)) {
           const serverState = participantSourceStates[source];
           const clientGen = Number(digest?.generation);
           const serverGen = Number(serverState?.generation || 0);
@@ -480,17 +492,20 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       // ============================================================
       // VALIDATE-THEN-COMMIT: build all next state in temp structures
       // ============================================================
-      const sourceSet = new Set(sources);
-      const previousSources = new Set(participant.sources || new Set());
-      const clientSourceStates = data.sourceStates || {};
+      const sourceSet = new Set<string>(sources);
+      const previousSources = new Set<string>(participant.sources || []);
+      const clientSourceStates = (data.sourceStates || {}) as Record<
+        string,
+        DynamicRecord
+      >;
 
       // Snapshot previous state BEFORE any mutation
-      const allSources = new Set([
+      const allSources = new Set<string>([
         ...Object.keys(participant.sourceStates || {}),
         ...previousSources,
         ...sourceSet,
       ]);
-      const previousStates = new Map();
+      const previousStates = new Map<string, DynamicRecord>();
       for (const source of allSources) {
         previousStates.set(
           source,
@@ -513,6 +528,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       for (const source of allSources) {
         const clientState = clientSourceStates[source];
         const previousState = previousStates.get(source);
+        if (!previousState) continue;
         const clientGeneration = Number.isSafeInteger(clientState?.generation)
           ? clientState.generation
           : previousState.generation;
@@ -564,10 +580,11 @@ export async function handleRoomMessage(room, ws, session, envelope) {
 
       // 5. Calculate complete next state
       const nextSources = new Set(sourceSet);
-      const nextSourceStates = {};
+      const nextSourceStates: Record<string, DynamicRecord> = {};
       const nowFs = Date.now();
       for (const source of allSources) {
         const previousState = previousStates.get(source);
+        if (!previousState) continue;
         const inNewSet = sourceSet.has(source);
         const desired = inNewSet ? "active" : "inactive";
         const clientState = clientSourceStates[source];
@@ -590,7 +607,10 @@ export async function handleRoomMessage(room, ws, session, envelope) {
       }
 
       // Compute publications to retire
-      const publicationsToRetire = [];
+      const publicationsToRetire: Array<{
+        key: string;
+        publication: RoomPublication;
+      }> = [];
       for (const [key, publication] of room.publishedSources) {
         if (
           publication.peerId === session.peerId &&
@@ -740,7 +760,9 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           receivedAt - previousFreshnessAt <= QOE_REPORT_MAX_AGE_MS);
       const report = {
         provider,
-        paths: data.paths.slice(0, 32).map((path) => normalizeQoePath(path)),
+        paths: data.paths
+          .slice(0, 32)
+          .map((path: DynamicRecord) => normalizeQoePath(path)),
         sampledAt: Number(data.sampledAt) || receivedAt,
         receivedAt,
         stableSince:
@@ -869,7 +891,12 @@ export async function handleRoomMessage(room, ws, session, envelope) {
   }
 }
 
-function relayClientSfuRtt(room, ws, session, data) {
+function relayClientSfuRtt(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   const rttMs = Number(data.rttMs);
   if (!Number.isFinite(rttMs) || rttMs < 0) return;
   const participant = room.participants.get(
@@ -889,7 +916,12 @@ function relayClientSfuRtt(room, ws, session, data) {
   }
 }
 
-function relayCodecMigrationState(room, ws, session, data) {
+function relayCodecMigrationState(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   const logicalStreamId =
     typeof data.logicalStreamId === "string" &&
     data.logicalStreamId.length > 0 &&
@@ -952,7 +984,14 @@ function relayCodecMigrationState(room, ws, session, data) {
   );
 }
 
-async function authenticateRoomSession(room, ws, session, type, data, now) {
+async function authenticateRoomSession(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  type: string,
+  data: DynamicRecord,
+  now: number,
+) {
   if (type !== MEDIA_CONTROL_CLIENT_HELLO) {
     room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
       error: "Authentication required",
@@ -1138,7 +1177,12 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
   room.maybeStartQualification();
 }
 
-async function handleProviderReady(room, ws, session, data) {
+async function handleProviderReady(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   if (
     !room.pendingRoute ||
     Number(data.epoch) !== room.pendingRoute.epoch ||
@@ -1175,7 +1219,11 @@ async function handleProviderReady(room, ws, session, data) {
   await room.maybeCommitPendingRoute();
 }
 
-async function handleTopologyReady(room, session, data) {
+async function handleTopologyReady(
+  room: DynamicRecord,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   if (
     !room.pendingRoute ||
     room.pendingRoute.kind !== "sfu" ||
@@ -1189,20 +1237,28 @@ async function handleTopologyReady(room, session, data) {
   await room.maybeCommitPendingRoute();
 }
 
-function matchesProviderIdentity(route, data) {
+function matchesProviderIdentity(
+  route: DynamicRecord | null,
+  data: DynamicRecord,
+) {
   if (!route || data?.provider !== route.provider) return false;
   if (route.providerId) return data.providerId === route.providerId;
   return !data.providerId || data.providerId === null;
 }
 
-function operationCacheKey(session, operationId) {
+function operationCacheKey(session: DynamicRecord, operationId: string) {
   if (!operationId || !session) return null;
   return `${session.userId}:${session.deviceId}:${
     session.connectionEpoch ?? "?"
   }:${operationId}`;
 }
 
-async function handleLeave(room, ws, session, data) {
+async function handleLeave(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   const participantKey = `${session.userId}:${session.deviceId}`;
   const participant = room.participants.get(participantKey);
   room.leavePending.delete(participantKey);
@@ -1225,7 +1281,12 @@ async function handleLeave(room, ws, session, data) {
   ws.close(4000, "leave-acknowledged");
 }
 
-async function handleCloudflarePublication(room, ws, session, data) {
+async function handleCloudflarePublication(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   const source = normalizeMediaSources([data.source])?.[0];
   if (
     !session.cloudflareSessionId ||
@@ -1235,16 +1296,14 @@ async function handleCloudflarePublication(room, ws, session, data) {
     !source
   )
     return;
-  const target =
-    data.target && typeof data.target === "object"
-      ? Object.fromEntries(
-          ["width", "height", "fps", "bitrate"]
-            .map((field) => [field, Number(data.target[field])])
-            .filter(([, value]) => Number.isFinite(value) && value > 0)
-            .map(([field, value]) => [field, Math.floor(value)]),
-        )
-      : {};
-  const publication = {
+  const target: Record<string, number> = {};
+  if (data.target && typeof data.target === "object")
+    for (const field of ["width", "height", "fps", "bitrate"]) {
+      const value = Number(data.target[field]);
+      if (Number.isFinite(value) && value > 0)
+        target[field] = Math.floor(value);
+    }
+  const publication: RoomPublication = {
     sessionId: session.cloudflareSessionId,
     trackName: data.trackName,
     source,
@@ -1296,7 +1355,7 @@ async function handleCloudflarePublication(room, ws, session, data) {
           receivers: [
             ...new Set(
               data.receivers.filter(
-                (receiver) =>
+                (receiver: unknown) =>
                   typeof receiver === "string" && receiver.length <= 128,
               ),
             ),
@@ -1355,7 +1414,7 @@ async function handleCloudflarePublication(room, ws, session, data) {
     return;
   }
   let changed = false;
-  const closedPublications = [];
+  const closedPublications: RoomPublication[] = [];
   const previous = room.publishedSources.get(publicationKey);
   if (publication.closed) {
     for (const [key, current] of room.publishedSources)
@@ -1450,20 +1509,34 @@ async function handleCloudflarePublication(room, ws, session, data) {
   }
 }
 
-export async function verifyRoomTicket(room, ticket) {
+export async function verifyRoomTicket(
+  room: DynamicRecord,
+  ticket: unknown,
+): Promise<
+  { valid: true; claims: JWTPayload } | { valid: false; error: string }
+> {
   if (!ticket || typeof ticket !== "string")
     return { valid: false, error: "Missing ticket" };
   try {
     const claims = await verifyMediaTicket(ticket, room.env);
     if (!claims.sub || !claims.deviceId || !claims.channelId)
       return { valid: false, error: "Media ticket is missing required claims" };
-    if (!["auto", "direct"].includes(claims.connectionMode || "auto"))
+    const connectionMode = claims.connectionMode;
+    if (connectionMode !== undefined && typeof connectionMode !== "string")
+      return {
+        valid: false,
+        error: "Media ticket has an invalid connection mode",
+      };
+    if (!["auto", "direct"].includes(connectionMode || "auto"))
       return {
         valid: false,
         error: "Media ticket has an invalid connection mode",
       };
     return { valid: true, claims };
   } catch (error) {
-    return { valid: false, error: error.message || "Invalid media ticket" };
+    return {
+      valid: false,
+      error: error instanceof Error ? error.message : "Invalid media ticket",
+    };
   }
 }

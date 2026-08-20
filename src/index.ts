@@ -3,8 +3,8 @@ import { MediaRoomDO } from "./MediaRoomDO.ts";
 import { ProviderRegistryDO } from "./ProviderRegistryDO.ts";
 
 type WorkerBindings = {
-  MEDIA_ROOM_DO: DurableObjectNamespace<MediaRoomDO>;
-  PROVIDER_REGISTRY_DO: DurableObjectNamespace<ProviderRegistryDO>;
+  MEDIA_ROOM_DO: DurableObjectNamespace;
+  PROVIDER_REGISTRY_DO: DurableObjectNamespace;
 };
 
 const app = new Hono<{ Bindings: WorkerBindings }>();

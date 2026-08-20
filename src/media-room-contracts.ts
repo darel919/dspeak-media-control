@@ -12,16 +12,39 @@ const CODEC_EFFICIENCIES = new Set([
 ]);
 const CODEC_POWER_CLASSES = new Set(["low", "medium", "high"]);
 
-export function controlMessageByteLength(message) {
+type CodecDirection = {
+  supported: boolean;
+  acceleration: string;
+  realtimeEfficiency: string;
+  [key: string]: unknown;
+};
+
+type ConcurrentEncode = {
+  supported: boolean;
+  [key: string]: unknown;
+};
+
+type NormalizedMediaCapabilities = {
+  videoCodecs: Record<
+    string,
+    { encode: CodecDirection; decode: CodecDirection }
+  >;
+  concurrentEncode: ConcurrentEncode;
+  [key: string]: unknown;
+};
+
+export function controlMessageByteLength(message: unknown): number {
   if (typeof message === "string")
     return new TextEncoder().encode(message).byteLength;
-  return Number(message?.byteLength) || 0;
+  if (message && typeof message === "object" && "byteLength" in message)
+    return Number((message as { byteLength?: unknown }).byteLength) || 0;
+  return 0;
 }
 
-export function normalizeMediaSources(value) {
+export function normalizeMediaSources(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length > MAX_MEDIA_SOURCES) return null;
-  const sources = [];
-  const seen = new Set();
+  const sources: string[] = [];
+  const seen = new Set<string>();
   for (const source of value) {
     if (
       typeof source !== "string" ||
@@ -38,29 +61,36 @@ export function normalizeMediaSources(value) {
   return sources;
 }
 
-export function normalizeMediaOwnerSource(source, value) {
+export function normalizeMediaOwnerSource(
+  source: unknown,
+  value: unknown,
+): string | null {
   if (source !== "screen-audio") return null;
   return value === "system-audio" ? "system-audio" : "screen";
 }
 
-export function isVideoMediaSource(value) {
+export function isVideoMediaSource(value: unknown): boolean {
   return value === "camera" || value === "screen";
 }
 
-export function normalizeParticipantVoiceState(value) {
+export function normalizeParticipantVoiceState(value: unknown) {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : null;
   if (
-    !value ||
-    typeof value.muted !== "boolean" ||
-    typeof value.deafened !== "boolean"
+    !record ||
+    typeof record.muted !== "boolean" ||
+    typeof record.deafened !== "boolean"
   )
     return null;
   return {
-    muted: value.muted,
-    deafened: value.deafened,
+    muted: record.muted,
+    deafened: record.deafened,
   };
 }
 
-function boundedString(value, maxLength) {
+function boundedString(value: unknown, maxLength: number): string | null {
   return typeof value === "string" &&
     value.length > 0 &&
     value.length <= maxLength
@@ -68,24 +98,33 @@ function boundedString(value, maxLength) {
     : null;
 }
 
-function normalizeCodecDirection(value) {
-  const record = value && typeof value === "object" ? value : {};
+function normalizeCodecDirection(value: unknown): CodecDirection {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
   const supported = record.supported === true;
+  const accelerationValue =
+    typeof record.acceleration === "string" ? record.acceleration : "";
   const acceleration =
-    supported && CODEC_ACCELERATIONS.has(record.acceleration)
-      ? record.acceleration
+    supported && CODEC_ACCELERATIONS.has(accelerationValue)
+      ? accelerationValue
       : supported
         ? "software"
         : "unsupported";
-  const realtimeEfficiency =
-    supported && CODEC_EFFICIENCIES.has(record.realtimeEfficiency)
+  const efficiencyValue =
+    typeof record.realtimeEfficiency === "string"
       ? record.realtimeEfficiency
+      : "";
+  const realtimeEfficiency =
+    supported && CODEC_EFFICIENCIES.has(efficiencyValue)
+      ? efficiencyValue
       : supported
         ? acceleration === "hardware"
           ? "good"
           : "acceptable"
         : "unusable";
-  const result = {
+  const result: CodecDirection = {
     supported,
     acceleration,
     realtimeEfficiency,
@@ -101,15 +140,18 @@ function normalizeCodecDirection(value) {
   if (implementation) result.implementation = implementation;
   if (testedProfile) result.testedProfile = testedProfile;
   if (failureReason) result.failureReason = failureReason;
-  if (CODEC_POWER_CLASSES.has(record.powerClass))
-    result.powerClass = record.powerClass;
+  const powerClass =
+    typeof record.powerClass === "string" ? record.powerClass : "";
+  if (CODEC_POWER_CLASSES.has(powerClass)) result.powerClass = powerClass;
   if (record.tested === true) result.tested = true;
   return result;
 }
 
-export function normalizeMediaCapabilities(value) {
+export function normalizeMediaCapabilities(
+  value: unknown,
+): NormalizedMediaCapabilities | null {
   if (!value || typeof value !== "object") return null;
-  const record = value;
+  const record = value as Record<string, any>;
   const diagnostics =
     record.videoCodecDiagnostics &&
     typeof record.videoCodecDiagnostics === "object"
@@ -121,7 +163,7 @@ export function normalizeMediaCapabilities(value) {
     diagnostics.videoCodecs ||
     diagnostics.capabilities ||
     {};
-  const videoCodecs = {};
+  const videoCodecs: NormalizedMediaCapabilities["videoCodecs"] = {};
   for (const codec of VIDEO_CODECS) {
     const candidate = rawCodecs[codec] || rawCodecs[codec.toLowerCase()] || {};
     videoCodecs[codec] = {
@@ -131,7 +173,7 @@ export function normalizeMediaCapabilities(value) {
   }
   const rawConcurrent =
     record.concurrentEncode || diagnostics.concurrentEncode || {};
-  const concurrentEncode = {
+  const concurrentEncode: ConcurrentEncode = {
     supported: rawConcurrent.supported === true,
   };
   const maxHardwareSessions = Number(rawConcurrent.maxHardwareSessions);
@@ -139,13 +181,19 @@ export function normalizeMediaCapabilities(value) {
     concurrentEncode.maxHardwareSessions = Math.floor(maxHardwareSessions);
   if (Array.isArray(rawConcurrent.testedCodecPairs)) {
     const testedCodecPairs = rawConcurrent.testedCodecPairs
-      .filter((pair) => Array.isArray(pair) && pair.length === 2)
-      .map((pair) => [
-        String(pair[0]).toUpperCase(),
-        String(pair[1]).toUpperCase(),
-      ])
       .filter(
-        (pair) =>
+        (pair: unknown): pair is [unknown, unknown] =>
+          Array.isArray(pair) && pair.length === 2,
+      )
+      .map(
+        (pair: [unknown, unknown]) =>
+          [String(pair[0]).toUpperCase(), String(pair[1]).toUpperCase()] as [
+            string,
+            string,
+          ],
+      )
+      .filter(
+        (pair: [string, string]) =>
           VIDEO_CODECS.includes(pair[0]) && VIDEO_CODECS.includes(pair[1]),
       );
     if (testedCodecPairs.length)
@@ -157,7 +205,7 @@ export function normalizeMediaCapabilities(value) {
     rawConcurrent.confidence === "unknown"
   )
     concurrentEncode.confidence = rawConcurrent.confidence;
-  const result = { videoCodecs, concurrentEncode };
+  const result: NormalizedMediaCapabilities = { videoCodecs, concurrentEncode };
   if (
     record.source === "native-runtime-probe" ||
     record.source === "browser-probe" ||
@@ -169,7 +217,7 @@ export function normalizeMediaCapabilities(value) {
   return result;
 }
 
-export function mediaPublicationKey(publication) {
+export function mediaPublicationKey(publication: Record<string, any>): string {
   const peerId = String(publication?.peerId || "");
   const logicalStreamId = String(
     publication?.logicalStreamId || publication?.source || "",

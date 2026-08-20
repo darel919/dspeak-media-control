@@ -18,10 +18,11 @@ import {
   scheduleProviderRecovery,
 } from "./media-room-provider.ts";
 import { isVideoMediaSource } from "./media-room-contracts.ts";
+import type { DynamicRecord, RoomRoute } from "./domain-types.ts";
 
 const P2P_QUALIFICATION_STABILITY_MS = 2_000;
 
-export function maybeCommitPendingRoute(room) {
+export function maybeCommitPendingRoute(room: DynamicRecord) {
   if (!room.pendingRoute) return Promise.resolve();
   const expected = new Set(
     [...room.participants.values()].map((participant) => participant.peerId),
@@ -39,7 +40,7 @@ export function maybeCommitPendingRoute(room) {
   return Promise.resolve();
 }
 
-export function maybeStartQualification(room) {
+export function maybeStartQualification(room: DynamicRecord) {
   const participantCount = room.participants.size;
   if (participantCount === 0) return;
   const hasVideo = [...room.participants.values()].some((participant) =>
@@ -168,7 +169,7 @@ export function maybeStartQualification(room) {
     room.sendTopology(participant.ws, { action: "qualify-p2p" });
 }
 
-export function checkQualificationComplete(room) {
+export function checkQualificationComplete(room: DynamicRecord) {
   const expectedPeers = new Set(
     [...room.participants.values()].map((participant) => participant.peerId),
   );
@@ -218,7 +219,7 @@ export function checkQualificationComplete(room) {
   );
   if (
     activeCandidate &&
-    (!p2pCandidate.paths.every((path) => path.rttMs != null) ||
+    (!p2pCandidate.paths.every((path: DynamicRecord) => path.rttMs != null) ||
       !qoeWouldImprove(activeCandidate, p2pCandidate, Date.now()))
   ) {
     void room.state.storage.setAlarm?.(Date.now() + 1_000);
@@ -234,7 +235,7 @@ export function checkQualificationComplete(room) {
   );
 }
 
-export function commitRoute(room, route) {
+export function commitRoute(room: DynamicRecord, route: RoomRoute) {
   const validation = room.validateRoute(route, room.getConnectionMode());
   if (!validation.valid) {
     console.warn("[MediaRoomDO] Route rejected:", validation.error);
@@ -325,7 +326,7 @@ export function commitRoute(room, route) {
 }
 
 export function restoreQualificationRoute(
-  room,
+  room: DynamicRecord,
   reason = "p2p-qualification-failed",
 ) {
   const fallback = room.qualificationFallbackRoute;

@@ -15,17 +15,26 @@ import {
 } from "./provider-config.ts";
 import { mediaDebug } from "./debug.ts";
 import { isVideoMediaSource } from "./media-room-contracts.ts";
+import type { DynamicRecord, RoomRoute } from "./domain-types.ts";
+import type { WebSocket as CloudflareWebSocket } from "@cloudflare/workers-types";
 
 const PROVIDER_FAILURE_COOLDOWN_MS = 30_000;
 export const QOE_REPORT_MAX_AGE_MS = 30_000;
 export const MAX_QOE_REPORTS_PER_PARTICIPANT = 16;
 export const MAX_QOE_PROVIDER_ID_LENGTH = 128;
 
-export function providerHealthKey(provider, providerId = null) {
+export function providerHealthKey(
+  provider: string,
+  providerId: string | null = null,
+) {
   return providerId ? `${provider}:${providerId}` : provider;
 }
 
-export function getProviderHealth(room, provider, providerId = null) {
+export function getProviderHealth(
+  room: DynamicRecord,
+  provider: string,
+  providerId: string | null = null,
+) {
   const familyHealth = room.providerHealth.get(provider);
   if (
     familyHealth?.healthy === false &&
@@ -38,7 +47,7 @@ export function getProviderHealth(room, provider, providerId = null) {
   );
 }
 
-function providerFromHealthKey(healthKey) {
+function providerFromHealthKey(healthKey: string) {
   if (healthKey === SFU_PROVIDER.CLOUDFLARE_REALTIME)
     return SFU_PROVIDER.CLOUDFLARE_REALTIME;
   if (healthKey === SFU_PROVIDER.MEDIASOUP) return SFU_PROVIDER.MEDIASOUP;
@@ -49,11 +58,11 @@ function providerFromHealthKey(healthKey) {
   return healthKey;
 }
 
-export function getConfiguredProviderCapabilities(room) {
+export function getConfiguredProviderCapabilities(room: DynamicRecord) {
   return configuredSfuProviders(room.env);
 }
 
-export function getCommonProviderCapabilities(room) {
+export function getCommonProviderCapabilities(room: DynamicRecord) {
   if (
     (!room.participants || typeof room.participants.values !== "function") &&
     typeof room.getCommonProviderCapabilities === "function"
@@ -71,7 +80,7 @@ export function getCommonProviderCapabilities(room) {
   );
 }
 
-export function getAvailableProviderCapabilities(room) {
+export function getAvailableProviderCapabilities(room: DynamicRecord) {
   const available = getCommonProviderCapabilities(room);
   const now = Date.now();
   for (const provider of available) {
@@ -82,8 +91,11 @@ export function getAvailableProviderCapabilities(room) {
   return available;
 }
 
-export function getNextProviderRecoveryAt(room, now = Date.now()) {
-  let retryAt = null;
+export function getNextProviderRecoveryAt(
+  room: DynamicRecord,
+  now = Date.now(),
+) {
+  let retryAt: number | null = null;
   const configured = getCommonProviderCapabilities(room);
   for (const [healthKey, health] of room.providerHealth) {
     const provider = providerFromHealthKey(healthKey);
@@ -100,7 +112,10 @@ export function getNextProviderRecoveryAt(room, now = Date.now()) {
   return retryAt;
 }
 
-export function getProviderRecoveryTarget(room, now = Date.now()) {
+export function getProviderRecoveryTarget(
+  room: DynamicRecord,
+  now = Date.now(),
+) {
   const candidates = new Set();
   const configured = getCommonProviderCapabilities(room);
   for (const [healthKey, health] of room.providerHealth) {
@@ -121,12 +136,15 @@ export function getProviderRecoveryTarget(room, now = Date.now()) {
       : null;
 }
 
-export function scheduleProviderRecovery(room, now = Date.now()) {
+export function scheduleProviderRecovery(
+  room: DynamicRecord,
+  now = Date.now(),
+) {
   const retryAt = getNextProviderRecoveryAt(room, now);
   if (retryAt) void room.state.storage.setAlarm?.(Math.max(now + 1, retryAt));
 }
 
-export function getQoeCandidates(room) {
+export function getQoeCandidates(room: DynamicRecord) {
   const grouped = new Map();
   const now = Date.now();
   for (const [peerId, storedReports] of room.qoeMetrics) {
@@ -134,7 +152,7 @@ export function getQoeCandidates(room) {
       storedReports instanceof Map
         ? [...storedReports.entries()]
         : [[null, storedReports]];
-    const expiredKeys = [];
+    const expiredKeys: string[] = [];
     for (const [reportKey, report] of reports) {
       if (!Array.isArray(report?.paths)) continue;
       const receivedAt = Number(report.receivedAt);
@@ -200,9 +218,9 @@ export function getQoeCandidates(room) {
 }
 
 export function shouldUseProviderRegistry(
-  room,
-  targetProvider,
-  excludedProvider,
+  room: DynamicRecord,
+  targetProvider: string | null,
+  excludedProvider: string | null,
 ) {
   if (!providerRegistryEnabled(room.env)) return false;
   if (targetProvider === SFU_PROVIDER.MEDIASOUP) return true;
@@ -212,12 +230,17 @@ export function shouldUseProviderRegistry(
   );
 }
 
-export async function handleCloudflareRequest(room, ws, session, data) {
+export async function handleCloudflareRequest(
+  room: DynamicRecord,
+  ws: CloudflareWebSocket,
+  session: DynamicRecord,
+  data: DynamicRecord,
+) {
   const requestId = data.requestId;
   const operation = data.operation;
   const appId = room.env.CLOUDFLARE_REALTIME_APP_ID;
   const appSecret = room.env.CLOUDFLARE_REALTIME_APP_SECRET;
-  const sendResult = (result) =>
+  const sendResult = (result: DynamicRecord) =>
     room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.CLOUDFLARE_RESPONSE, {
       requestId,
       ...result,
@@ -260,7 +283,7 @@ export async function handleCloudflareRequest(room, ws, session, data) {
   }
   if (operation === "tracks-new") {
     const remoteTracks = (data.body?.tracks || []).filter(
-      (track) => track?.location === "remote",
+      (track: DynamicRecord) => track?.location === "remote",
     );
     const knownTracks = new Set(
       [...room.publishedSources.values()].map(
@@ -269,7 +292,8 @@ export async function handleCloudflareRequest(room, ws, session, data) {
     );
     if (
       remoteTracks.some(
-        (track) => !knownTracks.has(`${track.sessionId}:${track.trackName}`),
+        (track: DynamicRecord) =>
+          !knownTracks.has(`${track.sessionId}:${track.trackName}`),
       )
     ) {
       sendResult({ error: "Cloudflare track is not published in this room" });
@@ -305,7 +329,7 @@ export async function handleCloudflareRequest(room, ws, session, data) {
     sendResult({ error: "Cloudflare Realtime request failed" });
     return;
   }
-  const result = await response.json().catch(() => ({}));
+  const result = (await response.json().catch(() => ({}))) as DynamicRecord;
   if (response.ok && operation === "new-session" && result.sessionId) {
     session.cloudflareSessionId = result.sessionId;
     // Also update the participant record so reconnect preserves it
@@ -332,7 +356,11 @@ export async function handleCloudflareRequest(room, ws, session, data) {
   );
 }
 
-export async function handleP2PFailure(room, session, reason) {
+export async function handleP2PFailure(
+  room: DynamicRecord,
+  session: DynamicRecord,
+  reason: string,
+) {
   if (room.route.kind !== MEDIA_ROUTE_KIND.P2P || room.route.path !== "direct")
     return;
   const participant = room.participants.get(
@@ -388,14 +416,21 @@ export async function handleP2PFailure(room, session, reason) {
 }
 
 export async function handleProviderFailure(
-  room,
+  room: DynamicRecord,
   {
     provider,
-    reason,
+    reason = "provider-failure",
     providerId: failedProviderId = null,
     eventEpoch: failedEpoch = null,
     sourceRevision: failedSourceRevision = null,
     failedRoute = null,
+  }: {
+    provider?: string;
+    reason?: string;
+    providerId?: string | null;
+    eventEpoch?: number | null;
+    sourceRevision?: number | null;
+    failedRoute?: RoomRoute | null;
   } = {},
 ) {
   if (!provider) return;
@@ -412,13 +447,14 @@ export async function handleProviderFailure(
         ? Number(failedSourceRevision)
         : null;
   const explicitFailedRoute =
-    failedRoute?.provider === provider &&
+    failedRoute &&
+    failedRoute.provider === provider &&
     (failedRoute.providerId
       ? failedRoute.providerId === failedProviderId
       : !failedProviderId)
       ? failedRoute
       : null;
-  const routeMatchesFailure = (route) => {
+  const routeMatchesFailure = (route: RoomRoute | null) => {
     if (!route || route.provider !== provider) return false;
     if (
       route.providerId
@@ -558,11 +594,11 @@ export async function handleProviderFailure(
 }
 
 export async function beginTransition(
-  room,
-  targetProvider,
+  room: DynamicRecord,
+  targetProvider: string | null,
   reason = "provider-transition",
-  excludedProvider = null,
-  excludedProviderId = null,
+  excludedProvider: string | null = null,
+  excludedProviderId: string | null = null,
 ) {
   if (room.pendingRoute || room.transitionInFlight) return;
   room.transitionInFlight = true;
@@ -570,8 +606,8 @@ export async function beginTransition(
     ? null
     : excludedProvider;
   let selectedProvider = targetProvider;
-  let selectedProviderConfig = null;
-  let selectedProviderId = null;
+  let selectedProviderConfig: DynamicRecord | null = null;
+  let selectedProviderId: string | null = null;
   let registrySelectionSucceeded = false;
   const shouldUseRegistry = shouldUseProviderRegistry(
     room,
@@ -612,7 +648,7 @@ export async function beginTransition(
         }),
       );
       if (response.ok) {
-        const selection = await response.json();
+        const selection = (await response.json()) as DynamicRecord;
         selectedProvider = selection.route?.provider || selectedProvider;
         selectedProviderConfig = selection.provider || null;
         selectedProviderId =
@@ -714,7 +750,9 @@ export async function beginTransition(
     room.transitionInFlight = false;
     await handleProviderFailure(room, {
       provider: selectedProvider,
-      reason: `provider-ticket-${error?.message || "failed"}`,
+      reason: `provider-ticket-${
+        error instanceof Error ? error.message : "failed"
+      }`,
       providerId: targetRoute.providerId,
       eventEpoch: targetRoute.epoch,
       sourceRevision: targetRoute.sourceRevision,
@@ -725,7 +763,10 @@ export async function beginTransition(
   room.transitionInFlight = false;
 }
 
-export async function issueProviderTickets(room, route) {
+export async function issueProviderTickets(
+  room: DynamicRecord,
+  route: RoomRoute,
+) {
   await Promise.all(
     [...room.participants.values()]
       .filter((participant) => participant.ws)
@@ -733,7 +774,11 @@ export async function issueProviderTickets(room, route) {
   );
 }
 
-export async function issueProviderTicket(room, participant, route) {
+export async function issueProviderTicket(
+  room: DynamicRecord,
+  participant: DynamicRecord,
+  route: RoomRoute,
+) {
   if (route.provider !== SFU_PROVIDER.MEDIASOUP) return;
   const ticket = await createProviderTicket(
     room,
@@ -757,10 +802,10 @@ export async function issueProviderTicket(room, participant, route) {
 }
 
 export async function createProviderTicket(
-  room,
-  participant,
-  route,
-  providerConfig = null,
+  room: DynamicRecord,
+  participant: DynamicRecord,
+  route: RoomRoute,
+  providerConfig: DynamicRecord | null = null,
 ) {
   const now = Math.floor(Date.now() / 1000);
   const ttl = Number(room.env.PROVIDER_TICKET_TTL_SECONDS);

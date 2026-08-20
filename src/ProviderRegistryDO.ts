@@ -2,9 +2,17 @@ import { SFU_PROVIDER, MEDIA_ROUTE_KIND } from "./protocol.ts";
 import { rankQoeCandidates } from "./qoe.ts";
 import { isSelfHostedMediasoupConfigured } from "./provider-config.ts";
 import { mediaDebug } from "./debug.ts";
+import type { DurableObjectState } from "@cloudflare/workers-types";
+import type { DynamicRecord, MediaControlEnv } from "./domain-types.ts";
 
 export class ProviderRegistryDO {
-  constructor(state, env) {
+  state: DurableObjectState;
+  env: MediaControlEnv;
+  providers: Map<string, DynamicRecord>;
+  circuitBreakers: Map<string, DynamicRecord>;
+  stateLoaded: boolean;
+
+  constructor(state: DurableObjectState, env: MediaControlEnv) {
     this.state = state;
     this.env = env;
     this.providers = new Map();
@@ -12,7 +20,7 @@ export class ProviderRegistryDO {
     this.stateLoaded = false;
   }
 
-  async fetch(request) {
+  async fetch(request: Request) {
     await this.loadDurableState();
     const url = new URL(request.url);
 
@@ -39,7 +47,7 @@ export class ProviderRegistryDO {
     return new Response("Not found", { status: 404 });
   }
 
-  async handleRegister(request) {
+  async handleRegister(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
     if (!isSelfHostedMediasoupConfigured(this.env))
@@ -49,7 +57,7 @@ export class ProviderRegistryDO {
         }),
         { status: 503 },
       );
-    const data = await request.json();
+    const data = (await request.json()) as DynamicRecord;
     const {
       providerId,
       signalingUrl,
@@ -99,10 +107,10 @@ export class ProviderRegistryDO {
     return new Response(JSON.stringify({ success: true }));
   }
 
-  async handleHealth(request) {
+  async handleHealth(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
-    const providers = [];
+    const providers: DynamicRecord[] = [];
     for (const [id, provider] of this.providers) {
       const cb = this.circuitBreakers.get(id);
       providers.push({
@@ -114,7 +122,7 @@ export class ProviderRegistryDO {
     return new Response(JSON.stringify({ providers }));
   }
 
-  async handleSelect(request) {
+  async handleSelect(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
     if (!isSelfHostedMediasoupConfigured(this.env))
@@ -124,7 +132,7 @@ export class ProviderRegistryDO {
         }),
         { status: 503 },
       );
-    const data = await request.json();
+    const data = (await request.json()) as DynamicRecord;
     const {
       roomId,
       connectionMode,
@@ -175,11 +183,11 @@ export class ProviderRegistryDO {
 
     const rankedQoe = rankQoeCandidates(
       qoeCandidates.filter(
-        (candidate) =>
+        (candidate: DynamicRecord) =>
           Number(candidate.readyParticipants) >=
             Number(candidate.requiredParticipants) &&
           candidate.paths?.length > 0 &&
-          candidate.paths.every((path) =>
+          candidate.paths.every((path: DynamicRecord) =>
             Number.isFinite(Number(path.rttMs)),
           ) &&
           candidates.some(
@@ -254,10 +262,10 @@ export class ProviderRegistryDO {
     );
   }
 
-  async handleReportFailure(request) {
+  async handleReportFailure(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
-    const data = await request.json();
+    const data = (await request.json()) as DynamicRecord;
     const { providerId, error, correlated } = data;
 
     const cb = this.circuitBreakers.get(providerId);
@@ -286,10 +294,10 @@ export class ProviderRegistryDO {
     return new Response(JSON.stringify({ success: true, circuitBreaker: cb }));
   }
 
-  async handleReportSuccess(request) {
+  async handleReportSuccess(request: Request) {
     if (!this.isAuthorized(request))
       return new Response("Unauthorized", { status: 401 });
-    const data = await request.json();
+    const data = (await request.json()) as DynamicRecord;
     const providerId = String(data.providerId || "");
     const cb = this.circuitBreakers.get(providerId);
     const provider = this.providers.get(providerId);
@@ -334,7 +342,7 @@ export class ProviderRegistryDO {
     this.stateLoaded = true;
   }
 
-  isAuthorized(request) {
+  isAuthorized(request: Request) {
     const expected = this.env.MEDIA_CONTROL_ADMIN_TOKEN;
     return Boolean(
       expected && request.headers.get("authorization") === `Bearer ${expected}`,
@@ -389,7 +397,7 @@ export class ProviderRegistryDO {
   }
 }
 
-function getProviderFamily(provider) {
+function getProviderFamily(provider: DynamicRecord) {
   if (provider.provider === SFU_PROVIDER.CLOUDFLARE_REALTIME)
     return SFU_PROVIDER.CLOUDFLARE_REALTIME;
   if (provider.provider === SFU_PROVIDER.MEDIASOUP)
@@ -400,10 +408,10 @@ function getProviderFamily(provider) {
 }
 
 function selectProviderInstance(
-  candidates,
-  family,
-  qoeCandidate,
-  preferredRegion,
+  candidates: DynamicRecord[],
+  family: string,
+  qoeCandidate: DynamicRecord | null,
+  preferredRegion: string | null,
 ) {
   const familyCandidates = candidates.filter(
     (candidate) => getProviderFamily(candidate) === family,
@@ -427,7 +435,7 @@ function selectProviderInstance(
   return ranked[0] || null;
 }
 
-function normalizePriority(value) {
+function normalizePriority(value: unknown) {
   const priority = Number(value);
   return Number.isFinite(priority) ? priority : 10;
 }

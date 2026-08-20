@@ -73,7 +73,7 @@ function percentile(values: number[], fraction: number) {
 
 export function scoreQoeCandidate(candidate: any) {
   const paths = (candidate?.paths || []).map(normalizeQoePath);
-  const latency = paths.map((path) => {
+  const latency = paths.map((path: any) => {
     if (path.rttMs == null) return Number.POSITIVE_INFINITY;
     return (
       path.rttMs / 2 +
@@ -101,11 +101,11 @@ export function scoreQoeCandidate(candidate: any) {
       : Number.POSITIVE_INFINITY,
     worstLossPercent: Math.max(
       0,
-      ...finite(paths.map((path) => path.packetLossPercent ?? 0)),
+      ...finite(paths.map((path: any) => path.packetLossPercent ?? 0)),
     ),
     worstJitterMs: Math.max(
       0,
-      ...finite(paths.map((path) => path.jitterMs ?? 0)),
+      ...finite(paths.map((path: any) => path.jitterMs ?? 0)),
     ),
     p95QoeScore: percentile(finiteQualityScores, 0.95),
     qoeScore: worstQoeScore,

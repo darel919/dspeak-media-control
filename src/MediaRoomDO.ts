@@ -46,14 +46,80 @@ import {
   restoreQualificationRoute,
 } from "./media-room-topology.ts";
 import { mediaDebug } from "./debug.ts";
+import type {
+  DurableObjectState,
+  WebSocket as CloudflareWebSocket,
+} from "@cloudflare/workers-types";
+import type {
+  DynamicRecord,
+  MediaControlEnv,
+  OperationResult,
+  RoomParticipant,
+  RoomProviderConfig,
+  RoomProviderHealth,
+  RoomPublication,
+  RoomQoeMetrics,
+  RoomRoute,
+  RoomSession,
+} from "./domain-types.ts";
 
 export {
   controlMessageByteLength,
   normalizeMediaSources,
 } from "./media-room-contracts.ts";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isRoomRoute(value: unknown): value is RoomRoute {
+  if (!isRecord(value)) return false;
+  return (
+    (value.kind === MEDIA_ROUTE_KIND.LOCAL ||
+      value.kind === MEDIA_ROUTE_KIND.P2P ||
+      value.kind === MEDIA_ROUTE_KIND.SFU) &&
+    Number.isSafeInteger(value.epoch) &&
+    Number.isSafeInteger(value.sourceRevision) &&
+    typeof value.reason === "string"
+  );
+}
+
 export class MediaRoomDO {
-  constructor(state, env) {
+  state: DurableObjectState;
+  env: MediaControlEnv;
+  channelId: string | null;
+  sessions: Map<CloudflareWebSocket, RoomSession>;
+  participants: Map<string, RoomParticipant>;
+  route: RoomRoute;
+  pendingRoute: RoomRoute | null;
+  pendingStartedAt: number;
+  qualificationState: Map<string, DynamicRecord>;
+  providerReadiness: Set<string>;
+  transitionReadiness: Set<string>;
+  publishedSources: Map<string, RoomPublication>;
+  providerHealth: Map<string, RoomProviderHealth>;
+  qoeMetrics: Map<string, RoomQoeMetrics>;
+  providerConfig: RoomProviderConfig | null;
+  sourceRevision: number;
+  publicationRevision: number;
+  epoch: number;
+  roomRevision: bigint;
+  transitionGeneration: number;
+  transitionInFlight: boolean;
+  qualifiedParticipantSignature: string | null;
+  qualificationStartedAt: number;
+  qualificationFallbackRoute: RoomRoute | null;
+  qualificationParticipantSignature: string | null;
+  pendingRouteRefresh: DynamicRecord | null;
+  stateLoaded: boolean;
+  operationHistory: Set<string>;
+  operationResults: Map<string, OperationResult>;
+  maxOperationHistory: number;
+  operationResultsTTL: number;
+  leavePending: Set<string>;
+  participantConnectionEpochs: Map<string, number>;
+
+  constructor(state: DurableObjectState, env: MediaControlEnv) {
     this.state = state;
     this.env = env;
     this.channelId = null;
@@ -90,7 +156,7 @@ export class MediaRoomDO {
     this.state.blockConcurrencyWhile?.(() => this.loadDurableState());
   }
 
-  async fetch(request) {
+  async fetch(request: Request) {
     const url = new URL(request.url);
     const forwardedChannelId = request.headers.get("X-dSpeak-Channel-Id");
     if (forwardedChannelId) this.channelId ||= forwardedChannelId;
@@ -101,7 +167,9 @@ export class MediaRoomDO {
         mediaDebug(this.env, "room.websocket-rejected", { reason: "origin" });
         return new Response("WebSocket origin is not allowed", { status: 403 });
       }
-      const [client, server] = Object.values(new WebSocketPair());
+      const [client, server] = Object.values(
+        new WebSocketPair(),
+      ) as unknown as [WebSocket, CloudflareWebSocket];
       this.handleWebSocket(server);
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -111,7 +179,7 @@ export class MediaRoomDO {
     if (url.pathname.endsWith("/participants") && request.method === "GET")
       return Response.json({ participants: this.getParticipantList() });
     if (url.pathname.endsWith("/moderate") && request.method === "POST") {
-      const data = await request.json();
+      const data = (await request.json()) as DynamicRecord;
       const matches = [...this.participants.values()].filter(
         (participant) => participant.userId === String(data.userId || ""),
       );
@@ -128,14 +196,14 @@ export class MediaRoomDO {
     return new Response("WebSocket upgrade required", { status: 426 });
   }
 
-  isAdminRequest(request) {
+  isAdminRequest(request: Request) {
     const expected = this.env.MEDIA_CONTROL_ADMIN_TOKEN;
     return Boolean(
       expected && request.headers.get("authorization") === `Bearer ${expected}`,
     );
   }
 
-  isAllowedWebSocketOrigin(request) {
+  isAllowedWebSocketOrigin(request: Request) {
     const origin = request.headers.get("Origin");
     if (!origin) return true;
     const configured = String(this.env.MEDIA_CONTROL_ALLOWED_ORIGINS || "")
@@ -146,7 +214,7 @@ export class MediaRoomDO {
     return configured.includes(origin);
   }
 
-  handleWebSocket(ws) {
+  handleWebSocket(ws: CloudflareWebSocket) {
     const session = {
       authenticated: false,
       userId: null,
@@ -187,7 +255,10 @@ export class MediaRoomDO {
     );
   }
 
-  async webSocketMessage(ws, message) {
+  async webSocketMessage(
+    ws: CloudflareWebSocket,
+    message: string | ArrayBuffer,
+  ) {
     if (controlMessageByteLength(message) > MAX_CONTROL_MESSAGE_BYTES) {
       this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
         code: "MEDIA_MESSAGE_TOO_LARGE",
@@ -198,6 +269,7 @@ export class MediaRoomDO {
     }
     await this.loadDurableState();
     const session = this.getSession(ws);
+    if (!session) return;
     try {
       const data = JSON.parse(
         typeof message === "string"
@@ -224,12 +296,12 @@ export class MediaRoomDO {
     }
   }
 
-  webSocketClose(ws) {
+  webSocketClose(ws: CloudflareWebSocket) {
     const session = this.getSession(ws);
     if (session) this.handleDisconnect(ws, session);
   }
 
-  webSocketError(ws) {
+  webSocketError(ws: CloudflareWebSocket) {
     const session = this.getSession(ws);
     if (session) this.handleDisconnect(ws, session);
   }
@@ -328,34 +400,51 @@ export class MediaRoomDO {
       this.state.storage.get("participantConnectionEpochs"),
       this.state.storage.get("operationResults"),
     ]);
-    if (route) this.route = route;
-    if (Number.isSafeInteger(epoch)) this.epoch = epoch;
-    if (Number.isSafeInteger(sourceRevision))
+    if (isRoomRoute(route)) this.route = route;
+    if (typeof epoch === "number" && Number.isSafeInteger(epoch))
+      this.epoch = epoch;
+    if (
+      typeof sourceRevision === "number" &&
+      Number.isSafeInteger(sourceRevision)
+    )
       this.sourceRevision = sourceRevision;
-    if (Number.isSafeInteger(publicationRevision))
+    if (
+      typeof publicationRevision === "number" &&
+      Number.isSafeInteger(publicationRevision)
+    )
       this.publicationRevision = publicationRevision;
     if (typeof roomRevision === "bigint" || typeof roomRevision === "number")
       this.roomRevision = BigInt(roomRevision);
-    if (pendingRoute) this.pendingRoute = pendingRoute;
-    if (Number.isSafeInteger(pendingStartedAt))
+    if (isRoomRoute(pendingRoute)) this.pendingRoute = pendingRoute;
+    if (
+      typeof pendingStartedAt === "number" &&
+      Number.isSafeInteger(pendingStartedAt)
+    )
       this.pendingStartedAt = pendingStartedAt;
     if (Array.isArray(publishedSources))
       this.publishedSources = new Map(
-        publishedSources.map((publication) => [
-          mediaPublicationKey(publication),
-          publication,
-        ]),
+        publishedSources
+          .filter(isRecord)
+          .map((publication) => [
+            mediaPublicationKey(publication),
+            publication,
+          ]),
       );
     if (typeof qualifiedParticipantSignature === "string")
       this.qualifiedParticipantSignature = qualifiedParticipantSignature;
-    if (Number.isSafeInteger(qualificationStartedAt))
-      this.qualificationStartedAt = qualificationStartedAt;
-    if (providerConfig && typeof providerConfig === "object")
-      this.providerConfig = providerConfig;
-    if (providerHealth && typeof providerHealth === "object")
-      this.providerHealth = new Map(Object.entries(providerHealth));
     if (
-      qualificationFallbackRoute?.kind === MEDIA_ROUTE_KIND.SFU &&
+      typeof qualificationStartedAt === "number" &&
+      Number.isSafeInteger(qualificationStartedAt)
+    )
+      this.qualificationStartedAt = qualificationStartedAt;
+    if (isRecord(providerConfig)) this.providerConfig = providerConfig;
+    if (isRecord(providerHealth))
+      this.providerHealth = new Map(
+        Object.entries(providerHealth) as [string, RoomProviderHealth][],
+      );
+    if (
+      isRoomRoute(qualificationFallbackRoute) &&
+      qualificationFallbackRoute.kind === MEDIA_ROUTE_KIND.SFU &&
       qualificationFallbackRoute.provider
     )
       this.qualificationFallbackRoute = qualificationFallbackRoute;
@@ -386,22 +475,22 @@ export class MediaRoomDO {
     }
     const hasPersistedRoomState = Boolean(
       route ||
-      (Number.isSafeInteger(epoch) && epoch > 0) ||
-      (Number.isSafeInteger(sourceRevision) && sourceRevision > 0) ||
-      pendingRoute ||
-      pendingStartedAt ||
-      publishedSources?.length ||
-      providerConfig ||
-      providerHealth,
+      (typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch > 0) ||
+      (typeof sourceRevision === "number" &&
+        Number.isSafeInteger(sourceRevision) &&
+        sourceRevision > 0) ||
+      isRoomRoute(pendingRoute) ||
+      (typeof pendingStartedAt === "number" && pendingStartedAt > 0) ||
+      (Array.isArray(publishedSources) && publishedSources.length > 0) ||
+      isRecord(providerConfig) ||
+      isRecord(providerHealth),
     );
-    const hasReplayableOperation = this.operationResults.size > 0;
     const sockets = this.state.getWebSockets?.() || [];
     for (const ws of sockets) this.getSession(ws);
     if (
       hasPersistedRoomState &&
       !sockets.length &&
-      this.participants.size === 0 &&
-      !hasReplayableOperation
+      this.participants.size === 0
     )
       await this.resetDormantRoomState();
     this.stateLoaded = true;
@@ -469,7 +558,7 @@ export class MediaRoomDO {
     }
   }
 
-  async storeOperationResult(key, payload) {
+  async storeOperationResult(key: string, payload: OperationResult) {
     if (!key) return false;
     this.operationResults.set(key, {
       ...payload,
@@ -487,7 +576,7 @@ export class MediaRoomDO {
     return true;
   }
 
-  getSession(ws) {
+  getSession(ws: CloudflareWebSocket): RoomSession | undefined {
     const current = this.sessions.get(ws);
     if (current) return current;
     const restored = ws.deserializeAttachment?.();
@@ -498,14 +587,12 @@ export class MediaRoomDO {
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
         // Hibernation: preserve existing epoch, don't increment
         // Prefer the map, fall back to the restored attachment's own epoch
-        let connectionEpoch =
-          this.participantConnectionEpochs?.get(participantKey);
-        if (connectionEpoch === undefined) {
-          connectionEpoch = Number.isSafeInteger(restored.connectionEpoch)
-            ? restored.connectionEpoch
-            : 1;
+        const restoredEpoch = Number(restored.connectionEpoch);
+        const connectionEpoch = Number.isSafeInteger(restoredEpoch)
+          ? restoredEpoch
+          : (this.participantConnectionEpochs?.get(participantKey) ?? 1);
+        if (!this.participantConnectionEpochs.has(participantKey))
           this.participantConnectionEpochs.set(participantKey, connectionEpoch);
-        }
         this.participants.set(participantKey, {
           userId: restored.userId,
           deviceId: restored.deviceId,
@@ -541,7 +628,11 @@ export class MediaRoomDO {
     return restored;
   }
 
-  sendMessage(ws, type, data = {}) {
+  sendMessage(
+    ws: CloudflareWebSocket | null | undefined,
+    type: string,
+    data: DynamicRecord = {},
+  ) {
     if (
       !ws ||
       (ws.readyState !== undefined && ws.readyState !== WebSocket.OPEN)
@@ -556,7 +647,10 @@ export class MediaRoomDO {
     }
   }
 
-  sendTopology(ws, extra = {}) {
+  sendTopology(
+    ws: CloudflareWebSocket | null | undefined,
+    extra: DynamicRecord = {},
+  ) {
     const pending = this.pendingRoute;
     const qualificationFallbackProvider =
       this.route.kind === MEDIA_ROUTE_KIND.P2P &&
@@ -609,7 +703,11 @@ export class MediaRoomDO {
         this.sendTopology(ws);
   }
 
-  async relayP2PSignal(fromSession, data, ws) {
+  async relayP2PSignal(
+    fromSession: RoomSession,
+    data: DynamicRecord,
+    ws: CloudflareWebSocket,
+  ) {
     const sender = this.participants.get(
       `${fromSession.userId}:${fromSession.deviceId}`,
     );
@@ -643,11 +741,12 @@ export class MediaRoomDO {
     }
   }
 
-  isCurrentParticipantSession(ws, session) {
+  isCurrentParticipantSession(ws: CloudflareWebSocket, session: RoomSession) {
     if (!session?.authenticated) return false;
     const participant = this.participants.get(
       `${session.userId}:${session.deviceId}`,
     );
+    if (!participant) return false;
     const registered = this.sessions.get(ws);
     return (
       participant?.ws === ws &&
@@ -656,7 +755,11 @@ export class MediaRoomDO {
     );
   }
 
-  replaceParticipantSession(participantKey, previousParticipant, nextWs) {
+  replaceParticipantSession(
+    participantKey: string,
+    previousParticipant: RoomParticipant | undefined,
+    nextWs: CloudflareWebSocket,
+  ) {
     if (!previousParticipant || previousParticipant.ws === nextWs) return;
     const previousWs = previousParticipant.ws;
     const previousSession = previousWs
@@ -698,8 +801,8 @@ export class MediaRoomDO {
     void this.refreshPendingRouteSourceRevision();
   }
 
-  retireParticipantPublications(peerId) {
-    const retired = [];
+  retireParticipantPublications(peerId: string) {
+    const retired: RoomPublication[] = [];
     for (const [key, publication] of this.publishedSources) {
       if (publication.peerId !== peerId) continue;
       this.publishedSources.delete(key);
@@ -719,6 +822,12 @@ export class MediaRoomDO {
     broadcast = true,
     excludedWs = null,
     sourceRevision = null,
+  }: {
+    removed?: RoomPublication[];
+    upserted?: RoomPublication[];
+    broadcast?: boolean;
+    excludedWs?: CloudflareWebSocket | null;
+    sourceRevision?: number | null;
   } = {}) {
     const changed = removed.length > 0 || upserted.length > 0;
     if (!changed)
@@ -751,7 +860,10 @@ export class MediaRoomDO {
     };
   }
 
-  broadcastPublicationPush(publication, excludedWs = null) {
+  broadcastPublicationPush(
+    publication: RoomPublication,
+    excludedWs: CloudflareWebSocket | null = null,
+  ) {
     const push = {
       ...publication,
       publicationRevision: this.publicationRevision,
@@ -801,28 +913,43 @@ export class MediaRoomDO {
     return getQoeCandidates(this);
   }
 
-  beginTransition(...args) {
-    return beginTransition(this, ...args);
+  beginTransition(
+    targetProvider: string | null,
+    reason?: string,
+    excludedProvider?: string | null,
+    excludedProviderId?: string | null,
+  ) {
+    return beginTransition(
+      this,
+      targetProvider,
+      reason,
+      excludedProvider,
+      excludedProviderId,
+    );
   }
 
-  handleProviderFailure(...args) {
-    return handleProviderFailure(this, ...args);
+  handleProviderFailure(details: Parameters<typeof handleProviderFailure>[1]) {
+    return handleProviderFailure(this, details);
   }
 
-  handleP2PFailure(...args) {
-    return handleP2PFailure(this, ...args);
+  handleP2PFailure(session: RoomSession, reason: string) {
+    return handleP2PFailure(this, session, reason);
   }
 
-  handleCloudflareRequest(...args) {
-    return handleCloudflareRequest(this, ...args);
+  handleCloudflareRequest(
+    ws: CloudflareWebSocket,
+    session: RoomSession,
+    data: DynamicRecord,
+  ) {
+    return handleCloudflareRequest(this, ws, session, data);
   }
 
-  issueProviderTickets(...args) {
-    return issueProviderTickets(this, ...args);
+  issueProviderTickets(route: RoomRoute) {
+    return issueProviderTickets(this, route);
   }
 
-  issueProviderTicket(...args) {
-    return issueProviderTicket(this, ...args);
+  issueProviderTicket(participant: RoomParticipant, route: RoomRoute) {
+    return issueProviderTicket(this, participant, route);
   }
 
   refreshPendingRouteSourceRevision() {
@@ -881,8 +1008,12 @@ export class MediaRoomDO {
     return tracked;
   }
 
-  createProviderTicket(...args) {
-    return createProviderTicket(this, ...args);
+  createProviderTicket(
+    participant: RoomParticipant,
+    route: RoomRoute,
+    providerConfig?: RoomProviderConfig | null,
+  ) {
+    return createProviderTicket(this, participant, route, providerConfig);
   }
 
   maybeStartQualification() {
@@ -897,19 +1028,19 @@ export class MediaRoomDO {
     return checkQualificationComplete(this);
   }
 
-  restoreQualificationRoute(...args) {
-    return restoreQualificationRoute(this, ...args);
+  restoreQualificationRoute(reason?: string) {
+    return restoreQualificationRoute(this, reason);
   }
 
-  commitRoute(route) {
+  commitRoute(route: RoomRoute) {
     return commitRoute(this, route);
   }
 
-  validateRoute(route, mode) {
+  validateRoute(route: RoomRoute, mode: string) {
     return validateRouteForMode(route, mode);
   }
 
-  createInitialRoute(reason) {
+  createInitialRoute(reason: string) {
     return createLocalRoute(1, this.sourceRevision, reason);
   }
 
@@ -989,15 +1120,15 @@ export class MediaRoomDO {
   }
 
   applyCanonicalSnapshot(
-    ws,
-    operationId,
-    accepted,
-    code,
-    retryable,
-    extra = {},
+    ws: CloudflareWebSocket,
+    operationId: string,
+    accepted: boolean,
+    code: string | null | undefined,
+    retryable: boolean,
+    extra: DynamicRecord = {},
   ) {
     const snapshot = this.buildTopologySnapshot();
-    const payload = {
+    const payload: DynamicRecord = {
       operationId,
       accepted,
       roomRevision: this.roomRevision.toString(),
@@ -1027,21 +1158,25 @@ export class MediaRoomDO {
     return "unknown";
   }
 
-  async verifyMediaTicket(ticket) {
+  async verifyMediaTicket(ticket: string) {
     return verifyRoomTicket(this, ticket);
   }
 
-  async handleMessage(ws, session, envelope) {
+  async handleMessage(
+    ws: CloudflareWebSocket,
+    session: RoomSession,
+    envelope: DynamicRecord,
+  ) {
     return handleRoomMessage(this, ws, session, envelope);
   }
 
-  handleDisconnect(ws, session) {
+  handleDisconnect(ws: CloudflareWebSocket, session: RoomSession) {
     this.sessions.delete(ws);
     if (session.authenticated) {
       const participant = this.participants.get(
         `${session.userId}:${session.deviceId}`,
       );
-      if (participant?.ws === ws) {
+      if (participant && participant.ws === ws) {
         participant.ws = null;
         participant.status = "disconnected";
         participant.disconnectedAt = Date.now();
@@ -1052,15 +1187,19 @@ export class MediaRoomDO {
       this.stopControlLeaseTimer();
   }
 
-  async finalizeParticipantDisconnect(participantKey, participant) {
+  async finalizeParticipantDisconnect(
+    participantKey: string,
+    participant: RoomParticipant,
+  ) {
     if (!this.participants.delete(participantKey)) return;
     this.sourceRevision++;
     this.roomRevision++;
     this.qualifiedParticipantSignature = null;
-    this.qualificationState.delete(participant.peerId);
-    this.providerReadiness.delete(participant.peerId);
-    this.transitionReadiness.delete(participant.peerId);
-    this.retireParticipantPublications(participant.peerId);
+    const peerId = String(participant.peerId || "");
+    this.qualificationState.delete(peerId);
+    this.providerReadiness.delete(peerId);
+    this.transitionReadiness.delete(peerId);
+    this.retireParticipantPublications(peerId);
     void Promise.all([
       this.state.storage.put("publishedSources", [
         ...this.publishedSources.values(),
