@@ -3,7 +3,7 @@ import assert from "node:assert";
 
 describe("dspeak-media-control protocol", () => {
   it("creates local route", async () => {
-    const { createLocalRoute } = await import("../src/protocol.js");
+    const { createLocalRoute } = await import("../src/protocol.ts");
     const route = createLocalRoute(1, 5, "test");
     assert.strictEqual(route.kind, "local");
     assert.strictEqual(route.epoch, 1);
@@ -12,7 +12,7 @@ describe("dspeak-media-control protocol", () => {
   });
 
   it("creates P2P route", async () => {
-    const { createP2PRoute, P2P_PATH } = await import("../src/protocol.js");
+    const { createP2PRoute, P2P_PATH } = await import("../src/protocol.ts");
     const route = createP2PRoute(P2P_PATH.DIRECT, 2, 3, "qualified");
     assert.strictEqual(route.kind, "p2p");
     assert.strictEqual(route.path, "direct");
@@ -21,7 +21,7 @@ describe("dspeak-media-control protocol", () => {
   });
 
   it("creates SFU route", async () => {
-    const { createSFURoute, SFU_PROVIDER } = await import("../src/protocol.js");
+    const { createSFURoute, SFU_PROVIDER } = await import("../src/protocol.ts");
     const route = createSFURoute(
       SFU_PROVIDER.CLOUDFLARE_REALTIME,
       3,
@@ -44,7 +44,7 @@ describe("dspeak-media-control protocol", () => {
       P2P_PATH,
       SFU_PROVIDER,
       MEDIA_ROUTE_KIND,
-    } = await import("../src/protocol.js");
+    } = await import("../src/protocol.ts");
 
     const localRoute = createLocalRoute(1, 1, "test");
     assert.ok(validateRouteForMode(localRoute, "direct").valid);
@@ -71,7 +71,7 @@ describe("dspeak-media-control protocol", () => {
       checkP2PEligibility,
       getMediaChannelParticipantLimit,
       getP2PQualificationLimit,
-    } = await import("../src/protocol.js");
+    } = await import("../src/protocol.ts");
 
     assert.equal(MAX_MEDIA_CHANNEL_PARTICIPANTS, 100);
     assert.equal(P2P_PARTICIPANT_LIMITS.directAudio, 8);
@@ -96,7 +96,7 @@ describe("dspeak-media-control protocol", () => {
 
   it("compares route epochs", async () => {
     const { compareRouteEpoch, createP2PRoute, P2P_PATH } =
-      await import("../src/protocol.js");
+      await import("../src/protocol.ts");
 
     const route1 = createP2PRoute(P2P_PATH.DIRECT, 1, 5, "test");
     const route2 = createP2PRoute(P2P_PATH.DIRECT, 2, 3, "test");
@@ -112,7 +112,7 @@ describe("dspeak-media-control protocol", () => {
 
   it("does not invent an unavailable fallback provider", async () => {
     const { chooseAvailableProvider, SFU_PROVIDER } =
-      await import("../src/protocol.js");
+      await import("../src/protocol.ts");
 
     assert.equal(
       chooseAvailableProvider({

@@ -264,9 +264,9 @@ Non-fatal errors return `operation-ack` with `accepted: false` and error code. F
 
 Deterministic protocol tests in `tests/`:
 
-- `phase1-protocol.test.js`: P0/P1 defects
-- `phase6-topology-convergence.test.js`: Application/convergence split
-- `phase6-source-race.test.js`: Source mutation races
-- `phase6-screen-share.test.js`: Screen share matrix
-- `phase6-presence-chaos.test.js`: Join/leave/rejoin chaos
-- `phase6-signaling-chaos.test.js`: Provider/signaling chaos
+- `phase1-protocol.test.ts`: P0/P1 defects
+- `phase6-topology-convergence.test.ts`: Application/convergence split
+- `phase6-source-race.test.ts`: Source mutation races
+- `phase6-screen-share.test.ts`: Screen share matrix
+- `phase6-presence-chaos.test.ts`: Join/leave/rejoin chaos
+- `phase6-signaling-chaos.test.ts`: Provider/signaling chaos

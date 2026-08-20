@@ -4,7 +4,7 @@ import {
   MEDIA_CONTROL_MESSAGE_TYPES,
   SFU_PROVIDER,
   createSFURoute,
-} from "../src/protocol.js";
+} from "../src/protocol.ts";
 import { handleRoomMessage } from "../src/media-room-messages.ts";
 import { MediaRoomDO } from "../src/MediaRoomDO.ts";
 

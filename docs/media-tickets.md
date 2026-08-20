@@ -24,7 +24,7 @@ openssl pkey -in media-ticket-private.pem -pubout -out media-ticket-public.pem
 | `MEDIA_TICKET_PRIVATE_KEY` (dspeak)   | `base64 -i media-ticket-private.pem` |
 | `MEDIA_TICKET_PUBLIC_KEY` (this repo) | `base64 -i media-ticket-public.pem`  |
 
-`verifyMediaTicket()` (in `src/tickets.js`) requires the JWT to have
+`verifyMediaTicket()` (in `src/tickets.ts`) requires the JWT to have
 `iss: MEDIA_CONTROL_ISSUER` and `aud: "dspeak-media-control"`.
 
 ### Keypair 2 — provider tickets (this worker → dspeak-sfu)
@@ -50,13 +50,13 @@ key — not the media-ticket public key. Legacy naming; the comment in
 
 | Var                              | Required                  | Used by      | Purpose                                         |
 | -------------------------------- | ------------------------- | ------------ | ----------------------------------------------- |
-| `MEDIA_TICKET_PUBLIC_KEY`        | yes                       | `tickets.js` | verify media tickets from dspeak                |
-| `PROVIDER_TICKET_PRIVATE_KEY`    | yes                       | `tickets.js` | sign provider tickets for dspeak-sfu            |
+| `MEDIA_TICKET_PUBLIC_KEY`        | yes                       | `tickets.ts` | verify media tickets from dspeak                |
+| `PROVIDER_TICKET_PRIVATE_KEY`    | yes                       | `tickets.ts` | sign provider tickets for dspeak-sfu            |
 | `MEDIA_CONTROL_ADMIN_TOKEN`      | yes                       | registry/DO  | authenticate provider and admin calls           |
 | `CLOUDFLARE_REALTIME_APP_SECRET` | yes for Cloudflare routes | MediaRoomDO  | call Cloudflare Realtime APIs                   |
 | `CLOUDFLARE_REALTIME_APP_ID`     | yes for Cloudflare routes | MediaRoomDO  | identify the Realtime application               |
-| `MEDIA_CONTROL_ISSUER`           | no                        | `tickets.js` | expected issuer; default `dspeak-media-control` |
-| `PROVIDER_TICKET_TTL_SECONDS`    | no                        | `tickets.js` | provider ticket TTL; default 120                |
+| `MEDIA_CONTROL_ISSUER`           | no                        | `tickets.ts` | expected issuer; default `dspeak-media-control` |
+| `PROVIDER_TICKET_TTL_SECONDS`    | no                        | `tickets.ts` | provider ticket TTL; default 120                |
 
 Everything else that used to be listed (Supabase, R2, `MEDIA_CONTROL_DOMAIN`,
 `PROTOCOL_VERSION`, `MEDIA_TICKET_TTL_SECONDS`, `PROVIDER_TICKET_PUBLIC_KEY`)

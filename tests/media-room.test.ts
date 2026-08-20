@@ -7,7 +7,7 @@ import {
   chooseAvailableProvider,
   createP2PRoute,
   createSFURoute,
-} from "../src/protocol.js";
+} from "../src/protocol.ts";
 import { handleRoomMessage } from "../src/media-room-messages.ts";
 import {
   beginTransition,

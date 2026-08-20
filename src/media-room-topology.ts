@@ -6,7 +6,7 @@ import {
   checkP2PEligibility,
   createP2PRoute,
   createSFURoute,
-} from "./protocol.js";
+} from "./protocol.ts";
 import { qoeWouldImprove, rankQoeCandidates } from "./qoe.ts";
 import { mediaDebug } from "./debug.ts";
 import {

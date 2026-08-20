@@ -1,17 +1,75 @@
-export const MEDIA_CONTROL_PROTOCOL_VERSION = 919;
-export const MEDIA_CONTROL_CONTRACT_REVISION = 5;
-export const MEDIA_PROVIDER_PROTOCOL_REVISION = 919;
+export const MEDIA_CONTROL_PROTOCOL_VERSION = 919 as const;
+export const MEDIA_CONTROL_CONTRACT_REVISION = 5 as const;
+export const MEDIA_PROVIDER_PROTOCOL_REVISION = 919 as const;
 
-export const ROOM_REVISION = "roomRevision";
-export const CONNECTION_EPOCH = "connectionEpoch";
-export const OPERATION_ID = "operationId";
-export const REQUEST_ID = "requestId";
-export const SOURCE_GENERATION = "sourceGeneration";
-export const DESIRED_STATE = "desiredState";
+export const ROOM_REVISION = "roomRevision" as const;
+export const CONNECTION_EPOCH = "connectionEpoch" as const;
+export const OPERATION_ID = "operationId" as const;
+export const REQUEST_ID = "requestId" as const;
+export const SOURCE_GENERATION = "sourceGeneration" as const;
+export const DESIRED_STATE = "desiredState" as const;
 
-export const MEDIA_CONTROL_CLIENT_HELLO = "hello919";
-export const MEDIA_CONTROL_SERVER_HELLO = "hi919";
-export const MEDIA_CONTROL_ERROR = "error919";
+export const MEDIA_CONTROL_CLIENT_HELLO = "hello919" as const;
+export const MEDIA_CONTROL_SERVER_HELLO = "hi919" as const;
+export const MEDIA_CONTROL_ERROR = "error919" as const;
+
+export interface MediaControlClientHello {
+  protocolVersion: number;
+  contractRevision: number;
+  mediaSessionId: string;
+  [field: string]: unknown;
+}
+
+export interface MediaControlServerHello {
+  protocolVersion: number;
+  contractRevision: number;
+  mediaSessionId: string;
+  heartbeatIntervalMs: number;
+  heartbeatTimeoutMs: number;
+  serverTime: number;
+  roomRevision: string;
+  epoch: number;
+  sourceRevision: number;
+}
+
+export function isCompatibleClientHello(
+  data: unknown,
+  mediaSessionId: string,
+): data is MediaControlClientHello {
+  if (!data || typeof data !== "object") return false;
+  const hello = data as Record<string, unknown>;
+  return (
+    hello.protocolVersion === MEDIA_CONTROL_PROTOCOL_VERSION &&
+    hello.contractRevision === MEDIA_CONTROL_CONTRACT_REVISION &&
+    hello.mediaSessionId === mediaSessionId
+  );
+}
+
+export function buildServerHello({
+  mediaSessionId,
+  roomRevision = "0",
+  epoch = 0,
+  sourceRevision = 0,
+  serverTime = Date.now(),
+}: {
+  mediaSessionId: string;
+  roomRevision?: bigint | number | string;
+  epoch?: number;
+  sourceRevision?: number;
+  serverTime?: number;
+}): MediaControlServerHello {
+  return {
+    protocolVersion: MEDIA_CONTROL_PROTOCOL_VERSION,
+    contractRevision: MEDIA_CONTROL_CONTRACT_REVISION,
+    mediaSessionId,
+    heartbeatIntervalMs: CONTROL_HEARTBEAT_INTERVAL_MS,
+    heartbeatTimeoutMs: CONTROL_HEARTBEAT_TIMEOUT_MS,
+    serverTime,
+    roomRevision: String(roomRevision),
+    epoch,
+    sourceRevision,
+  };
+}
 
 export const MEDIA_CONTROL_MESSAGE_TYPES = {
   HELLO: MEDIA_CONTROL_CLIENT_HELLO,
@@ -39,7 +97,6 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   ROOM_SNAPSHOT: "room-snapshot",
   LEAVE: "leave",
   REQUEST_SNAPSHOT: "request-snapshot",
-
   WELCOME: MEDIA_CONTROL_SERVER_HELLO,
   TOPOLOGY_STATE: "topology-state",
   P2P_SIGNAL_RELAY: "p2p-signal-relay",
@@ -51,7 +108,7 @@ export const MEDIA_CONTROL_MESSAGE_TYPES = {
   CLOUDFLARE_RESPONSE: "cloudflare-response",
   CLOUDFLARE_PUBLICATION_AVAILABLE: "cloudflare-publication-available",
   PARTICIPANT_SFU_RTT: "participant-sfu-rtt",
-};
+} as const;
 
 export const ROOM_STATE = {
   IDLE: "idle",
@@ -62,23 +119,23 @@ export const ROOM_STATE = {
   COMMITTING_TRANSITION: "committing-transition",
   RECOVERING: "recovering",
   DEGRADED: "degraded",
-};
+} as const;
 
 export const MEDIA_ROUTE_KIND = {
   LOCAL: "local",
   P2P: "p2p",
   SFU: "sfu",
-};
+} as const;
 
 export const P2P_PATH = {
   DIRECT: "direct",
   RELAY: "relay",
-};
+} as const;
 
 export const SFU_PROVIDER = {
   CLOUDFLARE_REALTIME: "cloudflare-realtime",
   MEDIASOUP: "mediasoup",
-};
+} as const;
 
 export const CONTROL_HEARTBEAT_INTERVAL_MS = 5000;
 export const CONTROL_HEARTBEAT_TIMEOUT_MS = 15000;
@@ -91,19 +148,54 @@ export const P2P_PARTICIPANT_LIMITS = {
   directVideo: 4,
   autoAudio: 8,
   autoVideo: 4,
-};
+} as const;
+
+export type ConnectionMode = "auto" | "direct";
+export type MediaRouteKind =
+  (typeof MEDIA_ROUTE_KIND)[keyof typeof MEDIA_ROUTE_KIND];
+export type P2PPath = (typeof P2P_PATH)[keyof typeof P2P_PATH];
+export type SfuProvider = (typeof SFU_PROVIDER)[keyof typeof SFU_PROVIDER];
+
+export interface LocalRoute {
+  kind: "local";
+  epoch: number;
+  sourceRevision: number;
+  reason: string;
+}
+
+export interface P2PRoute {
+  kind: "p2p";
+  path: P2PPath;
+  epoch: number;
+  sourceRevision: number;
+  reason: string;
+}
+
+export interface SfuRoute {
+  kind: "sfu";
+  provider: string;
+  providerId?: string;
+  epoch: number;
+  sourceRevision: number;
+  reason: string;
+}
+
+export type MediaRoute = LocalRoute | P2PRoute | SfuRoute;
 
 export function getMediaChannelParticipantLimit(
-  connectionMode,
+  connectionMode: string,
   hasVideo = false,
-) {
+): number {
   if (connectionMode === "auto") return MAX_MEDIA_CHANNEL_PARTICIPANTS;
   return hasVideo
     ? P2P_PARTICIPANT_LIMITS.directVideo
     : P2P_PARTICIPANT_LIMITS.directAudio;
 }
 
-export function getP2PQualificationLimit(connectionMode, hasVideo) {
+export function getP2PQualificationLimit(
+  connectionMode: string,
+  hasVideo: boolean,
+): number {
   return connectionMode === "direct"
     ? hasVideo
       ? P2P_PARTICIPANT_LIMITS.directVideo
@@ -118,7 +210,12 @@ export function checkP2PEligibility({
   participantCount,
   hasVideo,
   requiredSources = [],
-}) {
+}: {
+  connectionMode: string;
+  participantCount: number;
+  hasVideo: boolean;
+  requiredSources?: readonly string[];
+}): { eligible: true } | { eligible: false; reason: string } {
   const limit = getP2PQualificationLimit(connectionMode, hasVideo);
   if (participantCount > limit)
     return {
@@ -130,33 +227,31 @@ export function checkP2PEligibility({
   return { eligible: true };
 }
 
-export function createLocalRoute(epoch, sourceRevision, reason) {
-  return {
-    kind: MEDIA_ROUTE_KIND.LOCAL,
-    epoch,
-    sourceRevision,
-    reason,
-  };
+export function createLocalRoute(
+  epoch: number,
+  sourceRevision: number,
+  reason: string,
+): LocalRoute {
+  return { kind: MEDIA_ROUTE_KIND.LOCAL, epoch, sourceRevision, reason };
 }
 
-export function createP2PRoute(path, epoch, sourceRevision, reason) {
-  return {
-    kind: MEDIA_ROUTE_KIND.P2P,
-    path,
-    epoch,
-    sourceRevision,
-    reason,
-  };
+export function createP2PRoute(
+  path: P2PPath,
+  epoch: number,
+  sourceRevision: number,
+  reason: string,
+): P2PRoute {
+  return { kind: MEDIA_ROUTE_KIND.P2P, path, epoch, sourceRevision, reason };
 }
 
 export function createSFURoute(
-  provider,
-  epoch,
-  sourceRevision,
-  reason,
-  providerId = null,
-) {
-  const route = {
+  provider: string,
+  epoch: number,
+  sourceRevision: number,
+  reason: string,
+  providerId: string | null = null,
+): SfuRoute {
+  const route: SfuRoute = {
     kind: MEDIA_ROUTE_KIND.SFU,
     provider,
     epoch,
@@ -167,7 +262,10 @@ export function createSFURoute(
   return route;
 }
 
-export function validateRouteForMode(route, mode) {
+export function validateRouteForMode(
+  route: MediaRoute,
+  mode: string,
+): { valid: true } | { valid: false; error: string } {
   if (mode === "direct") {
     if (route.kind === MEDIA_ROUTE_KIND.LOCAL) return { valid: true };
     if (route.kind === MEDIA_ROUTE_KIND.P2P && route.path === P2P_PATH.DIRECT)
@@ -180,7 +278,10 @@ export function validateRouteForMode(route, mode) {
   return { valid: true };
 }
 
-export function compareRouteEpoch(a, b) {
+export function compareRouteEpoch(
+  a: Pick<MediaRoute, "epoch" | "sourceRevision">,
+  b: Pick<MediaRoute, "epoch" | "sourceRevision">,
+): number {
   if (a.epoch !== b.epoch) return a.epoch < b.epoch ? -1 : 1;
   if (a.sourceRevision !== b.sourceRevision)
     return a.sourceRevision < b.sourceRevision ? -1 : 1;
@@ -193,7 +294,13 @@ export function chooseAvailableProvider({
   excludedProvider = null,
   registrySelectionSucceeded = false,
   allowDirectMediasoupFallback = false,
-}) {
+}: {
+  requestedProvider?: string | null;
+  availableProviders?: readonly string[];
+  excludedProvider?: string | null;
+  registrySelectionSucceeded?: boolean;
+  allowDirectMediasoupFallback?: boolean;
+}): string | null {
   const available = new Set(availableProviders);
   if (excludedProvider) available.delete(excludedProvider);
   if (requestedProvider && available.has(requestedProvider))

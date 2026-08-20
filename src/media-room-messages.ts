@@ -1,12 +1,11 @@
 import {
-  MEDIA_CONTROL_CONTRACT_REVISION,
   MEDIA_CONTROL_CLIENT_HELLO,
   MEDIA_CONTROL_MESSAGE_TYPES,
-  MEDIA_CONTROL_PROTOCOL_VERSION,
+  isCompatibleClientHello,
   SFU_PROVIDER,
   getMediaChannelParticipantLimit,
-} from "./protocol.js";
-import { verifyMediaTicket } from "./tickets.js";
+} from "./protocol.ts";
+import { verifyMediaTicket } from "./tickets.ts";
 import {
   MAX_CONTROL_MESSAGE_BYTES,
   normalizeMediaOwnerSource,
@@ -144,7 +143,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
         ? room.buildTopologySnapshot()
         : undefined,
     };
-    room.storeOperationResult(
+    await room.storeOperationResult(
       operationCacheKey(session, operationId),
       nackPayload,
     );
@@ -364,7 +363,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(
+      await room.storeOperationResult(
         operationCacheKey(session, operationId),
         ackPayload,
       );
@@ -413,7 +412,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(
+      await room.storeOperationResult(
         operationCacheKey(session, operationId),
         ackPayload,
       );
@@ -548,7 +547,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
             receivedGeneration: clientGeneration,
             canonicalState,
           };
-          room.storeOperationResult(
+          await room.storeOperationResult(
             operationCacheKey(session, operationId),
             nackPayload,
           );
@@ -677,7 +676,7 @@ export async function handleRoomMessage(room, ws, session, envelope) {
           ? room.buildTopologySnapshot()
           : undefined,
       };
-      room.storeOperationResult(
+      await room.storeOperationResult(
         operationCacheKey(session, operationId),
         ackPayload,
       );
@@ -969,11 +968,7 @@ async function authenticateRoomSession(room, ws, session, type, data, now) {
     ws.close(1008, verified.error);
     return;
   }
-  if (
-    Number(data.protocolVersion) !== MEDIA_CONTROL_PROTOCOL_VERSION ||
-    Number(data.contractRevision) !== MEDIA_CONTROL_CONTRACT_REVISION ||
-    data.mediaSessionId !== session.mediaSessionId
-  ) {
+  if (!isCompatibleClientHello(data, session.mediaSessionId)) {
     room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.ERROR, {
       error: "Media control protocol mismatch",
     });
@@ -1222,7 +1217,7 @@ async function handleLeave(room, ws, session, data) {
       ? room.buildTopologySnapshot()
       : undefined,
   };
-  room.storeOperationResult(
+  await room.storeOperationResult(
     operationCacheKey(session, data.operationId),
     ackPayload,
   );

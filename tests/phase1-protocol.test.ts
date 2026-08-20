@@ -6,12 +6,12 @@ import {
   SFU_PROVIDER,
   createSFURoute,
   getMediaChannelParticipantLimit,
-} from "../src/protocol.js";
+} from "../src/protocol.ts";
 import { handleRoomMessage } from "../src/media-room-messages.ts";
 import { MediaRoomDO } from "../src/MediaRoomDO.ts";
 
 test("media-control contract uses the 919 rev-5 wire family", async () => {
-  const protocol = await import("../src/protocol.js");
+  const protocol = await import("../src/protocol.ts");
   assert.equal(protocol.MEDIA_CONTROL_PROTOCOL_VERSION, 919);
   assert.equal(protocol.MEDIA_CONTROL_CONTRACT_REVISION, 5);
   assert.equal(protocol.MEDIA_CONTROL_CLIENT_HELLO, "hello919");

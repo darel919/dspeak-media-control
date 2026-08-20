@@ -2,11 +2,10 @@ import {
   CONTROL_HEARTBEAT_INTERVAL_MS,
   CONTROL_HEARTBEAT_TIMEOUT_MS,
   CONTROL_GRACE_PERIOD_MS,
-  MEDIA_CONTROL_CONTRACT_REVISION,
   MEDIA_CONTROL_CLIENT_HELLO,
   MEDIA_CONTROL_MESSAGE_TYPES,
-  MEDIA_CONTROL_PROTOCOL_VERSION,
   MEDIA_CONTROL_SERVER_HELLO,
+  buildServerHello,
   MEDIA_OPERATION_ACK_TIMEOUT_MS,
   MEDIA_ROUTE_KIND,
   OPERATION_ID,
@@ -14,7 +13,7 @@ import {
   SFU_PROVIDER,
   createLocalRoute,
   validateRouteForMode,
-} from "./protocol.js";
+} from "./protocol.ts";
 import {
   MAX_CONTROL_MESSAGE_BYTES,
   controlMessageByteLength,
@@ -88,6 +87,7 @@ export class MediaRoomDO {
     this.operationResultsTTL = 5 * 60 * 1000;
     this.leavePending = new Set();
     this.participantConnectionEpochs = new Map();
+    this.state.blockConcurrencyWhile?.(() => this.loadDurableState());
   }
 
   async fetch(request) {
@@ -177,17 +177,12 @@ export class MediaRoomDO {
     ws.send(
       JSON.stringify({
         type: MEDIA_CONTROL_SERVER_HELLO,
-        data: {
-          protocolVersion: MEDIA_CONTROL_PROTOCOL_VERSION,
-          contractRevision: MEDIA_CONTROL_CONTRACT_REVISION,
+        data: buildServerHello({
           mediaSessionId: session.mediaSessionId,
-          heartbeatIntervalMs: CONTROL_HEARTBEAT_INTERVAL_MS,
-          heartbeatTimeoutMs: CONTROL_HEARTBEAT_TIMEOUT_MS,
-          serverTime: Date.now(),
-          roomRevision: this.roomRevision.toString(),
+          roomRevision: this.roomRevision,
           epoch: this.epoch,
           sourceRevision: this.sourceRevision,
-        },
+        }),
       }),
     );
   }
@@ -472,14 +467,14 @@ export class MediaRoomDO {
     }
   }
 
-  storeOperationResult(key, payload) {
-    if (!key) return;
+  async storeOperationResult(key, payload) {
+    if (!key) return false;
     this.operationResults.set(key, {
       ...payload,
       createdAt: Date.now(),
     });
     this.cleanupOperationResults();
-    void this.state.storage.put(
+    await this.state.storage.put(
       "operationResults",
       [...this.operationResults.entries()].map(([k, value]) => ({
         key: k,
@@ -487,6 +482,7 @@ export class MediaRoomDO {
         createdAt: value.createdAt,
       })),
     );
+    return true;
   }
 
   getSession(ws) {

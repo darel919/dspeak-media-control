@@ -1,4 +1,4 @@
-import { SFU_PROVIDER, MEDIA_ROUTE_KIND } from "./protocol.js";
+import { SFU_PROVIDER, MEDIA_ROUTE_KIND } from "./protocol.ts";
 import { rankQoeCandidates } from "./qoe.ts";
 import { isSelfHostedMediasoupConfigured } from "./provider-config.ts";
 import { mediaDebug } from "./debug.ts";

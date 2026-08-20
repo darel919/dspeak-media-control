@@ -5,8 +5,8 @@ import {
   SFU_PROVIDER,
   chooseAvailableProvider,
   createSFURoute,
-} from "./protocol.js";
-import { signProviderTicket } from "./tickets.js";
+} from "./protocol.ts";
+import { signProviderTicket } from "./tickets.ts";
 import {
   configuredSfuProviders,
   isCloudflareRealtimeConfigured,

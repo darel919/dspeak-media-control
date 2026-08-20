@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ProviderRegistryDO } from "../src/ProviderRegistryDO.ts";
-import { SFU_PROVIDER } from "../src/protocol.js";
+import { SFU_PROVIDER } from "../src/protocol.ts";
 import { isSelfHostedMediasoupConfigured } from "../src/provider-config.ts";
 
 function registry() {

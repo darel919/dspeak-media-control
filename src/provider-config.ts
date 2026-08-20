@@ -1,4 +1,4 @@
-import { SFU_PROVIDER } from "./protocol.js";
+import { SFU_PROVIDER } from "./protocol.ts";
 
 function flag(value, fallback = false) {
   if (value == null || value === "") return fallback;

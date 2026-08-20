@@ -57,7 +57,7 @@ base64 -i provider-ticket-public.pem    # -> share with dspeak-sfu
 ```
 
 > `base64 -i` is macOS syntax (`-w 0` is GNU). The `.env.example` shows the
-> same values; `tickets.js` strips whitespace either way.
+> same values; `tickets.ts` strips whitespace either way.
 
 ### Environment variables
 
@@ -141,10 +141,10 @@ warning: wrangler secret put with --env requires `wrangler.toml` env config
 ### WebSocket protocol
 
 Client connects to `WS /media-control/:channelId` and must send a valid media
-ticket first (see `src/protocol.js` for message constants / route model).
+ticket first (see `src/protocol.ts` for message constants / route model).
 
 Protocol version: **919** — hello handshake family (`hello919`, `hi919`), same
-as the media signaling protocol in the main app. Contract revision: **3**;
+as the media signaling protocol in the main app. Contract revision: **5**;
 SFU readiness and failure acknowledgements echo the selected provider instance
 when one is assigned.
 
@@ -184,8 +184,8 @@ npm run format:check
 ```
 src/
   index.ts              Worker entry (Hono)
-  protocol.js           shared protocol constants + route helpers
-  tickets.js            media ticket verify + provider ticket sign
+  protocol.ts           shared protocol constants + route helpers
+  tickets.ts            media ticket verify + provider ticket sign
   MediaRoomDO.ts        per-channel media authority
   ProviderRegistryDO.ts provider registry + circuit breakers
 tests/                  node --test suite

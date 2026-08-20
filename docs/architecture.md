@@ -44,7 +44,7 @@ See `.env.example` for the full variable list and `wrangler.toml` for bindings.
 
 ## WebSocket/media protocol
 
-See `src/protocol.js` for message types and route model. Protocol version is `919`.
+See `src/protocol.ts` for message types and route model. Protocol version is `919`.
 Selected provider instance IDs are preserved in route state, topology messages,
 provider tickets, and `media-qoe` aggregation. QoE selection uses worst-path
 media quality rather than RTT alone, while family-only reports remain supported
@@ -61,8 +61,8 @@ npm run dev
 ```
 src/
   index.ts              Worker entry (Hono)
-  protocol.js           shared protocol constants + route helpers
-  tickets.js            media ticket verify + provider ticket sign
+  protocol.ts           shared protocol constants + route helpers
+  tickets.ts            media ticket verify + provider ticket sign
   MediaRoomDO.ts        per-channel media authority
   ProviderRegistryDO.ts provider registry + circuit breakers
 tests/                   node --test suite

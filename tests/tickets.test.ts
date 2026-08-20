@@ -7,7 +7,7 @@ import {
   exportSPKI,
   generateKeyPair,
 } from "jose";
-import { MEDIA_CONTROL_MESSAGE_TYPES } from "../src/protocol.js";
+import { MEDIA_CONTROL_MESSAGE_TYPES } from "../src/protocol.ts";
 import { MediaRoomDO } from "../src/MediaRoomDO.ts";
 
 let privateKey;
@@ -143,7 +143,7 @@ async function mediaToken(overrides = {}, options = {}) {
 }
 
 test("exports ticket functions", async () => {
-  const mod = await import("../src/tickets.js");
+  const mod = await import("../src/tickets.ts");
   assert.ok(typeof mod.verifyMediaTicket === "function");
   assert.ok(typeof mod.signProviderTicket === "function");
   assert.ok(typeof mod.getMediaVerifyKey === "function");
@@ -152,8 +152,8 @@ test("exports ticket functions", async () => {
 
 test("verifies a valid media ticket from raw PEM and base64 keys", async () => {
   const token = await mediaToken();
-  const raw = await import("../src/tickets.js?raw-key-test");
-  const encoded = await import("../src/tickets.js?base64-key-test");
+  const raw = await import("../src/tickets.ts?raw-key-test");
+  const encoded = await import("../src/tickets.ts?base64-key-test");
   const rawClaims = await raw.verifyMediaTicket(token, env());
   const encodedClaims = await encoded.verifyMediaTicket(
     token,
@@ -165,7 +165,7 @@ test("verifies a valid media ticket from raw PEM and base64 keys", async () => {
 });
 
 test("rejects expired, misissued, misaudienced, and altered media tickets", async () => {
-  const mod = await import("../src/tickets.js?security-test");
+  const mod = await import("../src/tickets.ts?security-test");
   const expired = await mediaToken(
     {},
     { expiration: Math.floor(Date.now() / 1000) - 10 },
@@ -185,7 +185,7 @@ test("rejects expired, misissued, misaudienced, and altered media tickets", asyn
 test("rejects a media ticket signed by a different key", async () => {
   const wrongKeyPair = await generateKeyPair("EdDSA");
   const token = await mediaToken({}, { key: wrongKeyPair.privateKey });
-  const mod = await import("../src/tickets.js?wrong-key-test");
+  const mod = await import("../src/tickets.ts?wrong-key-test");
 
   await assert.rejects(() => mod.verifyMediaTicket(token, env()));
 });
@@ -314,7 +314,7 @@ test("enforces direct audio/video and auto channel participant ceilings", async 
 });
 
 test("signs provider tickets with the configured TTL", async () => {
-  const mod = await import("../src/tickets.js?provider-ticket-test");
+  const mod = await import("../src/tickets.ts?provider-ticket-test");
   const token = await mod.signProviderTicket(
     { iss: issuer, aud: "dspeak-sfu", sub: "user-1" },
     env(),
