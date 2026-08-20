@@ -250,6 +250,60 @@ test("hibernated restoration resets persisted topology when only a stale closing
   });
 });
 
+test("hibernated restoration does not adopt a canonical epoch from a closing attachment", async () => {
+  const room = capacityRoom();
+  const closingWs = capacitySocket();
+  closingWs.readyState = 2;
+  closingWs.attachment = {
+    authenticated: true,
+    userId: "user-1",
+    deviceId: "device-1",
+    channelId: "channel-1",
+    peerId: "peer-1",
+    connectionMode: "auto",
+    connectionEpoch: 2,
+    sources: ["microphone"],
+    sourceStates: {},
+  };
+  const persisted = {
+    route: {
+      kind: "sfu",
+      provider: "cloudflare-realtime",
+      epoch: 3,
+      sourceRevision: 7,
+      reason: "active",
+    },
+    publishedSources: [
+      {
+        peerId: "peer-1",
+        source: "microphone",
+        connectionEpoch: 2,
+        generation: 1,
+      },
+    ],
+    providerHealth: {
+      "cloudflare-realtime": {
+        healthy: true,
+      },
+    },
+    participantConnectionEpochs: {
+      "user-1:device-1": 2,
+    },
+  };
+  room.stateLoaded = false;
+  room.state.storage.get = async (key) => persisted[key] ?? null;
+  room.state.getWebSockets = () => [closingWs];
+
+  await room.loadDurableState();
+
+  assert.equal(room.sessions.size, 0);
+  assert.equal(room.participants.size, 0);
+  assert.equal(room.route.kind, "local");
+  assert.equal(room.publishedSources.size, 0);
+  assert.equal(room.providerHealth.size, 0);
+  assert.equal(closingWs.closeCode, null);
+});
+
 test("webSocketClose cleans up the participant and completes the close handshake", () => {
   const room = capacityRoom();
   const ws = capacitySocket();

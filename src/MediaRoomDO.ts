@@ -618,6 +618,7 @@ export class MediaRoomDO {
         } catch {}
         return restored;
       }
+      if (ws.readyState !== WebSocket.OPEN) return restored;
       if (!previousParticipant?.ws || previousParticipant.ws === ws) {
         const connectionEpoch =
           canonicalEpoch ?? (hasRestoredEpoch ? restoredEpoch : 1);
