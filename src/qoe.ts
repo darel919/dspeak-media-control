@@ -181,24 +181,46 @@ export function scoreQoeCandidate(candidate: QoeCandidate): ScoredQoeCandidate {
   };
 }
 
-export function rankQoeCandidates(candidates: QoeCandidate[]) {
+export function rankQoeCandidates(
+  candidates: QoeCandidate[],
+  options: { objective?: "standard" | "ultra-low" } = {},
+) {
+  const ultraLow = options.objective === "ultra-low";
   return candidates.map(scoreQoeCandidate).sort((left, right) => {
-    const leftTuple = [
-      left.viable ? 0 : 1,
-      left.qoeScore,
-      left.p95QoeScore,
-      left.worstLossPercent,
-      left.worstJitterMs,
-      Number(left.infrastructureCost) || Number.POSITIVE_INFINITY,
-    ];
-    const rightTuple = [
-      right.viable ? 0 : 1,
-      right.qoeScore,
-      right.p95QoeScore,
-      right.worstLossPercent,
-      right.worstJitterMs,
-      Number(right.infrastructureCost) || Number.POSITIVE_INFINITY,
-    ];
+    const leftTuple = ultraLow
+      ? [
+          left.viable ? 0 : 1,
+          left.worstLatencyMs,
+          left.p95QoeScore,
+          left.worstLossPercent,
+          left.worstJitterMs,
+          Number(left.infrastructureCost) || Number.POSITIVE_INFINITY,
+        ]
+      : [
+          left.viable ? 0 : 1,
+          left.qoeScore,
+          left.p95QoeScore,
+          left.worstLossPercent,
+          left.worstJitterMs,
+          Number(left.infrastructureCost) || Number.POSITIVE_INFINITY,
+        ];
+    const rightTuple = ultraLow
+      ? [
+          right.viable ? 0 : 1,
+          right.worstLatencyMs,
+          right.p95QoeScore,
+          right.worstLossPercent,
+          right.worstJitterMs,
+          Number(right.infrastructureCost) || Number.POSITIVE_INFINITY,
+        ]
+      : [
+          right.viable ? 0 : 1,
+          right.qoeScore,
+          right.p95QoeScore,
+          right.worstLossPercent,
+          right.worstJitterMs,
+          Number(right.infrastructureCost) || Number.POSITIVE_INFINITY,
+        ];
     for (let index = 0; index < leftTuple.length; index += 1) {
       if (leftTuple[index] !== rightTuple[index])
         return leftTuple[index] - rightTuple[index];
@@ -211,6 +233,7 @@ export function qoeWouldImprove(
   active: QoeCandidate | null | undefined,
   candidate: QoeCandidate,
   now = Date.now(),
+  options: { objective?: "standard" | "ultra-low" } = {},
 ) {
   if (!candidate?.viable) return false;
   if (!active) return false;
@@ -226,8 +249,10 @@ export function qoeWouldImprove(
   )
     return false;
   if (!Number.isFinite(Number(candidate.stableSince))) return false;
-  if (now - Number(candidate.stableSince) < 10_000) return false;
+  const stabilityMs = options.objective === "ultra-low" ? 15_000 : 10_000;
+  const marginMs = options.objective === "ultra-low" ? 30 : 20;
+  if (now - Number(candidate.stableSince) < stabilityMs) return false;
   const activeScore = Number(active.qoeScore ?? active.worstLatencyMs);
   const candidateScore = Number(candidate.qoeScore ?? candidate.worstLatencyMs);
-  return activeScore - candidateScore >= 20;
+  return activeScore - candidateScore >= marginMs;
 }

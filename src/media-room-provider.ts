@@ -337,7 +337,6 @@ export async function handleCloudflareRequest(
   const result: DynamicRecord = isRecord(parsedResult) ? parsedResult : {};
   if (response.ok && operation === "new-session" && result.sessionId) {
     session.cloudflareSessionId = result.sessionId;
-    // Also update the participant record so reconnect preserves it
     const participantKey = `${session.userId}:${session.deviceId}`;
     const participant = room.participants.get(participantKey);
     if (participant?.ws === ws) {

@@ -9,6 +9,7 @@ import {
 } from "./protocol.ts";
 import { qoeWouldImprove, rankQoeCandidates } from "./qoe.ts";
 import { mediaDebug } from "./debug.ts";
+import { providerEffectiveQuantumUs } from "./provider-audio-latency.ts";
 import {
   getQoeCandidates,
   getAvailableProviderCapabilities,
@@ -43,6 +44,10 @@ export function maybeCommitPendingRoute(room: DynamicRecord) {
 export function maybeStartQualification(room: DynamicRecord) {
   const participantCount = room.participants.size;
   if (participantCount === 0) return;
+  const audioLatencyProfile =
+    room.mediaPolicy?.audioLatencyProfile === "ultra-low"
+      ? "ultra-low"
+      : "standard";
   const hasVideo = [...room.participants.values()].some((participant) =>
     [...participant.sources].some((source) => isVideoMediaSource(source)),
   );
@@ -54,6 +59,7 @@ export function maybeStartQualification(room: DynamicRecord) {
     requiredSources: [...room.publishedSources.values()].map(
       (source) => source.source,
     ),
+    audioLatencyProfile,
   });
   if (!eligibility.eligible) {
     if (connectionMode === "direct") {
@@ -170,6 +176,10 @@ export function maybeStartQualification(room: DynamicRecord) {
 }
 
 export function checkQualificationComplete(room: DynamicRecord) {
+  const audioLatencyProfile =
+    room.mediaPolicy?.audioLatencyProfile === "ultra-low"
+      ? "ultra-low"
+      : "standard";
   const expectedPeers = new Set(
     [...room.participants.values()].map((participant) => participant.peerId),
   );
@@ -206,21 +216,29 @@ export function checkQualificationComplete(room: DynamicRecord) {
   const candidateReports = [...room.qualificationState.values()].flatMap(
     (state) => state.candidateReports || [],
   );
-  const p2pCandidate = rankQoeCandidates([
-    {
-      provider: "p2p",
-      paths: candidateReports,
-      stableSince: room.qualificationStartedAt,
-    },
-  ])[0];
+  const objective =
+    audioLatencyProfile === "ultra-low"
+      ? { objective: "ultra-low" as const }
+      : { objective: "standard" as const };
+  const p2pCandidate = rankQoeCandidates(
+    [
+      {
+        provider: "p2p",
+        paths: candidateReports,
+        stableSince: room.qualificationStartedAt,
+      },
+    ],
+    objective,
+  )[0];
   const activeProvider = room.qualificationFallbackRoute?.provider || null;
-  const activeCandidate = rankQoeCandidates(getQoeCandidates(room)).find(
-    (candidate) => candidate.provider === activeProvider,
-  );
+  const activeCandidate = rankQoeCandidates(
+    getQoeCandidates(room),
+    objective,
+  ).find((candidate) => candidate.provider === activeProvider);
   if (
     activeCandidate &&
     (!p2pCandidate.paths.every((path: DynamicRecord) => path.rttMs != null) ||
-      !qoeWouldImprove(activeCandidate, p2pCandidate, Date.now()))
+      !qoeWouldImprove(activeCandidate, p2pCandidate, Date.now(), objective))
   ) {
     void room.state.storage.setAlarm?.(Date.now() + 1_000);
     return;
@@ -273,6 +291,42 @@ export function commitRoute(room: DynamicRecord, route: RoomRoute) {
     );
   room.qualificationState.clear();
   room.transitionReadiness.clear();
+
+  room.routeDecision = {
+    requestedProfile:
+      room.mediaPolicy?.audioLatencyProfile === "ultra-low"
+        ? "ultra-low"
+        : "standard",
+    effectiveProfile:
+      room.mediaPolicy?.audioLatencyProfile === "ultra-low"
+        ? "ultra-low"
+        : "standard",
+
+    quantumUs:
+      route.kind === MEDIA_ROUTE_KIND.SFU && route.provider
+        ? providerEffectiveQuantumUs(
+            route.provider,
+            room.mediaPolicy?.audioLatencyProfile === "ultra-low"
+              ? "ultra-low"
+              : "standard",
+          )
+        : 10000,
+    p2pEligible: route.kind === MEDIA_ROUTE_KIND.P2P,
+    p2pQualificationResult:
+      route.kind === MEDIA_ROUTE_KIND.P2P
+        ? route.reason === "qualified-direct-mesh"
+          ? "qualified"
+          : route.reason === "qualifying-direct"
+            ? "qualifying"
+            : route.reason
+        : null,
+    p2pScore: null,
+    activeSfuScore: null,
+    decisionReason: route.reason,
+    fallbackReason:
+      route.kind === MEDIA_ROUTE_KIND.SFU && route.reason ? route.reason : null,
+    decidedAt: Date.now(),
+  };
   mediaDebug(room.env, "room.route-committed", {
     kind: route.kind,
     provider: route.provider,
@@ -318,6 +372,9 @@ export function commitRoute(room: DynamicRecord, route: RoomRoute) {
         roomRevision: room.roomRevision.toString(),
         participants: room.getParticipantList(),
         peers: room.getParticipantList(),
+        mediaPolicy: room.mediaPolicy,
+        audioLatencyProfile:
+          room.mediaPolicy?.audioLatencyProfile ?? "standard",
       });
   return persistence.then(() => {
     if (shouldStartQualification) void room.maybeStartQualification?.();

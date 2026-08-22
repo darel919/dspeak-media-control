@@ -25,6 +25,10 @@ import {
   providerHealthKey,
 } from "./media-room-provider.ts";
 import { mediaDebug } from "./debug.ts";
+import {
+  compatibilityAudioLatencyCapabilities,
+  normalizeAudioLatencyCapabilities,
+} from "./audio-latency-capabilities.ts";
 import { normalizeQoePath } from "./qoe.ts";
 import type { JWTPayload } from "jose";
 import type { WebSocket as CloudflareWebSocket } from "@cloudflare/workers-types";
@@ -101,10 +105,6 @@ export async function handleRoomMessage(
     return;
   }
 
-  // Operation replay happens only after authentication and current-session
-  // validation. Cache is keyed by participantKey:epoch:operationId so a
-  // superseded socket or a newer connection epoch can never replay a result
-  // that belongs to a different incarnation.
   if (operationId && isMutation) {
     const cachedKey = `${session.userId}:${session.deviceId}:${
       session.connectionEpoch ?? "?"
@@ -190,7 +190,6 @@ export async function handleRoomMessage(
         (Number.isSafeInteger(clientConnectionEpoch) &&
           Number.isSafeInteger(serverConnectionEpoch) &&
           clientConnectionEpoch !== serverConnectionEpoch);
-      // Also reconcile client's local source digest if present
       let sourceDigestMismatch = false;
       if (
         data.localSourceDigest &&
@@ -230,7 +229,6 @@ export async function handleRoomMessage(
               `${session.userId}:${session.deviceId}`,
             ) || 1,
         });
-        // Also send HEARTBEAT_ACK so the client updates its liveness state
         room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.HEARTBEAT_ACK, {
           sequence: data.sequence,
           timestamp: now,
@@ -406,12 +404,24 @@ export async function handleRoomMessage(
       );
       if (!participant || !mediaCapabilities) break;
       participant.mediaCapabilities = mediaCapabilities;
+      const audioLatencySource =
+        data.audioLatency ||
+        (data.mediaCapabilities &&
+        typeof data.mediaCapabilities === "object" &&
+        !Array.isArray(data.mediaCapabilities)
+          ? (data.mediaCapabilities as Record<string, unknown>).audioLatency
+          : null);
+      if (audioLatencySource)
+        participant.audioLatencyCapabilities =
+          normalizeAudioLatencyCapabilities(audioLatencySource);
       participant.capabilityProtocol =
         typeof data.capabilityProtocol === "string"
           ? data.capabilityProtocol
           : participant.capabilityProtocol;
       session.mediaCapabilities = mediaCapabilities;
       session.capabilityProtocol = participant.capabilityProtocol;
+      if (participant.audioLatencyCapabilities)
+        session.audioLatencyCapabilities = participant.audioLatencyCapabilities;
       session.sourceStates = structuredClone(participant.sourceStates || {});
       session.cloudflareSessionId = participant.cloudflareSessionId ?? null;
       ws.serializeAttachment(session);
@@ -489,9 +499,6 @@ export async function handleRoomMessage(
         break;
       }
 
-      // ============================================================
-      // VALIDATE-THEN-COMMIT: build all next state in temp structures
-      // ============================================================
       const sourceSet = new Set<string>(sources);
       const previousSources = new Set<string>(participant.sources || []);
       const clientSourceStates = (data.sourceStates || {}) as Record<
@@ -499,7 +506,6 @@ export async function handleRoomMessage(
         DynamicRecord
       >;
 
-      // Snapshot previous state BEFORE any mutation
       const allSources = new Set<string>([
         ...Object.keys(participant.sourceStates || {}),
         ...previousSources,
@@ -520,11 +526,6 @@ export async function handleRoomMessage(
         );
       }
 
-      // 1. Validate source identifiers (already done by normalizeMediaSources)
-
-      // 2. Validate participant limits (done above)
-
-      // 3. Validate every generation
       for (const source of allSources) {
         const clientState = clientSourceStates[source];
         const previousState = previousStates.get(source);
@@ -538,8 +539,6 @@ export async function handleRoomMessage(
         const desiredChanged = desired !== previousState.desiredState;
         const membershipChanged = inNewSet !== wasInPreviousSet;
         const isStale = clientGeneration < previousState.generation;
-        // Enforce strictly increasing generation for actual state transitions
-        // Idempotent replays (same desired state + same membership) allow equality
         const requiresGenerationAdvance = desiredChanged || membershipChanged;
         const generationValid = requiresGenerationAdvance
           ? clientGeneration > previousState.generation
@@ -575,10 +574,6 @@ export async function handleRoomMessage(
           return;
         }
       }
-
-      // 4. Validate epoch (control epoch is implicit in session)
-
-      // 5. Calculate complete next state
       const nextSources = new Set(sourceSet);
       const nextSourceStates: Record<string, DynamicRecord> = {};
       const nowFs = Date.now();
@@ -606,7 +601,6 @@ export async function handleRoomMessage(
         };
       }
 
-      // Compute publications to retire
       const publicationsToRetire: Array<{
         key: string;
         publication: RoomPublication;
@@ -620,9 +614,7 @@ export async function handleRoomMessage(
             key,
             publication: { ...publication, closed: true },
           });
-        }
-        // Also retire older generations for sources that are still present but advanced generation
-        else if (
+        } else if (
           publication.peerId === session.peerId &&
           sourceSet.has(publication.source) &&
           publication.generation <
@@ -635,8 +627,6 @@ export async function handleRoomMessage(
         }
       }
 
-      // 6. Commit atomically - do NOT store provisional result
-      // Store only the final result after all mutations and revisions are committed
       participant.sources = nextSources;
       session.sources = [...nextSources];
       participant.sourceStates = nextSourceStates;
@@ -647,7 +637,6 @@ export async function handleRoomMessage(
       }
       ws.serializeAttachment(session);
 
-      // Compute sourceStateChanged for revision bump
       const sourceStateChanged = [...previousStates.keys()].some((source) => {
         const prev = previousStates.get(source);
         const curr = nextSourceStates[source];
@@ -673,11 +662,6 @@ export async function handleRoomMessage(
           room.state.storage.put("sourceRevision", room.sourceRevision),
         ]);
       }
-      // Publication retirement goes through the centralized revision helper:
-      // one bump, one persistence commit (publishedSources +
-      // publicationRevision + roomRevision), and close pushes that carry the
-      // new revision. The helper also bumps roomRevision, so skipping the
-      // source-only branch above is safe when retirements occur.
       if (publicationsToRetire.length > 0) {
         room.commitPublicationMutation({
           removed: publicationsToRetire.map((retired) => retired.publication),
@@ -949,7 +933,6 @@ function relayCodecMigrationState(
     return false;
   const publication = [...room.publishedSources.values()].find((candidate) => {
     if (
-      // The sender is a receiver; the publication belongs to another peer.
       candidate.peerId === session.peerId ||
       candidate.logicalStreamId !== logicalStreamId ||
       candidate.variantId !== variantId ||
@@ -1047,19 +1030,10 @@ async function authenticateRoomSession(
     );
   }
   session.connectionEpoch = connectionEpoch;
-
-  // Preserve Cloudflare session ID across control-plane reconnects.
-  // The client preserves the Cloudflare PeerConnection and re-announces
-  // publications with the new connectionEpoch. We must retain the
-  // provider-session identity so the server accepts those re-announces.
   const preservedCloudflareSessionId = resumedParticipant?.cloudflareSessionId;
   if (preservedCloudflareSessionId) {
     session.cloudflareSessionId = preservedCloudflareSessionId;
   }
-
-  // Synchronize resumed participant state into session BEFORE first serialization.
-  // This ensures hibernation captures canonical source state even if no subsequent
-  // source/voice/capability mutation occurs before hibernation.
   if (resumedParticipant) {
     session.sources = [...(resumedParticipant.sources || [])];
     session.sourceStates = structuredClone(
@@ -1097,6 +1071,18 @@ async function authenticateRoomSession(
     normalizeMediaCapabilities(data.mediaCapabilities) ||
     resumedParticipant?.mediaCapabilities ||
     null;
+  const audioLatencySource =
+    data.audioLatency ||
+    (data.mediaCapabilities &&
+    typeof data.mediaCapabilities === "object" &&
+    !Array.isArray(data.mediaCapabilities) &&
+    (data.mediaCapabilities as Record<string, unknown>).audioLatency
+      ? (data.mediaCapabilities as Record<string, unknown>).audioLatency
+      : null);
+  session.audioLatencyCapabilities = audioLatencySource
+    ? normalizeAudioLatencyCapabilities(audioLatencySource)
+    : resumedParticipant?.audioLatencyCapabilities ||
+      compatibilityAudioLatencyCapabilities();
   session.capabilityProtocol =
     typeof data.capabilityProtocol === "string"
       ? data.capabilityProtocol
@@ -1127,6 +1113,9 @@ async function authenticateRoomSession(
     disconnectedAt: null,
     mediaCapabilities: session.mediaCapabilities,
     capabilityProtocol: session.capabilityProtocol,
+    audioLatencyCapabilities:
+      session.audioLatencyCapabilities ||
+      compatibilityAudioLatencyCapabilities(),
     connectionEpoch,
     cloudflareSessionId: session.cloudflareSessionId,
   });
@@ -1373,13 +1362,7 @@ async function handleCloudflarePublication(
     `${session.userId}:${session.deviceId}`,
   );
   const canonical = participant?.sourceStates?.[source];
-  // Provider callbacks are NOT authoritative. The canonical source state
-  // (participant desired state + generation + epoch) decides whether a
-  // publication is current. A stale provider completion must not resurrect
-  // a source the participant already stopped.
   const clientEpoch = Number(publication.connectionEpoch);
-  // Server-owned epoch: prefer the participant record (set at attach),
-  // fall back to the session for restored/hibernated paths.
   const serverEpoch = Number(
     participant?.connectionEpoch ?? session.connectionEpoch,
   );
@@ -1425,8 +1408,6 @@ async function handleCloudflarePublication(
           current.variantId === publication.variantId) &&
         (!publication.trackName ||
           current.trackName === publication.trackName) &&
-        // Generation/epoch fencing: only retire if the publication being closed
-        // is the same or older generation than what we have
         (!publication.generation ||
           !current.generation ||
           Number(publication.generation) >= Number(current.generation)) &&
@@ -1440,8 +1421,6 @@ async function handleCloudflarePublication(
         changed = true;
       }
   } else if (previous) {
-    // Idempotent replay: identical canonical publication must not move
-    // revisions. Compare the stored vs incoming publication field-by-field.
     const ignoredFields = new Set(["updatedAt"]);
     const same = [
       ...new Set([...Object.keys(previous), ...Object.keys(publication)]),
@@ -1460,9 +1439,6 @@ async function handleCloudflarePublication(
     room.publishedSources.set(publicationKey, publication);
     changed = true;
   }
-  // Revision domains are distinct: publicationRevision tracks provider
-  // publication changes, sourceRevision tracks logical desired source-set
-  // mutations, roomRevision tracks any canonical snapshot change.
   if (changed) {
     room.commitPublicationMutation({
       removed: publication.closed ? closedPublications : [],
@@ -1470,11 +1446,6 @@ async function handleCloudflarePublication(
       excludedWs: ws,
     });
   }
-  // publicationState mirrors the canonical FSM: a live provider publication
-  // means "published"; a closed one means the source has no provider
-  // publication and returns to "announced" (still active by intent) or
-  // "unpublished" (inactive). This keeps sourceState.publicationState
-  // authoritative instead of frozen from an earlier intent mutation.
   if (participant?.sourceStates?.[source]) {
     const sourceState = participant.sourceStates[source];
     const nextPublicationState = publication.closed
@@ -1494,11 +1465,6 @@ async function handleCloudflarePublication(
         room.state.storage.put("sourceRevision", room.sourceRevision),
         room.state.storage.put("roomRevision", room.roomRevision),
       ]);
-      // Copy the authoritative participant state into the session BEFORE
-      // serializing: hibernation reconstructs entirely from the attachment,
-      // so a stale session.sourceStates would persist the old
-      // publicationState ("announced") even though the revision already
-      // advanced to the transition that produced "published".
       session.sourceStates = structuredClone(participant.sourceStates);
       if (participant.cloudflareSessionId)
         session.cloudflareSessionId = participant.cloudflareSessionId;

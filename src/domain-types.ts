@@ -54,6 +54,7 @@ export interface RoomSession {
   qualifiedPeerIds?: string[];
   providerReadyEpoch?: number | null;
   providerReadySourceRevision?: number | null;
+  audioLatencyCapabilities?: AudioLatencyCapabilitiesV1 | null;
 }
 
 export interface RoomParticipant {
@@ -75,12 +76,45 @@ export interface RoomParticipant {
   status?: "connected" | "disconnected" | string;
   disconnectedAt?: number | null;
   cloudflareSessionId?: string | null;
+  audioLatencyCapabilities?: AudioLatencyCapabilitiesV1 | null;
 }
 
 export type RoomRoute = MediaRoute & {
   provider?: string;
   providerId?: string;
 };
+
+export type AudioLatencyProfileValue = "standard" | "ultra-low";
+export type AudioQuantumUs = 2500 | 5000 | 10000;
+
+export type EffectiveAudioLatencyMode =
+  | "standard-10ms"
+  | "ultra-low-10ms-compat"
+  | "ultra-low-5ms"
+  | "ultra-low-2_5ms";
+
+export interface AudioLatencyCapabilitiesV1 {
+  version: 1;
+  nativeAudioEngine: boolean;
+  restrictedLowDelayOpus: boolean;
+  captureQuantaUs: readonly AudioQuantumUs[];
+  encodeFrameDurationsUs: readonly AudioQuantumUs[];
+  decodeFrameDurationsUs: readonly AudioQuantumUs[];
+  renderQuantaUs: readonly AudioQuantumUs[];
+}
+
+export interface MediaPolicySnapshot {
+  audioLatencyProfile: AudioLatencyProfileValue;
+  revision: number;
+  updatedAt: string | null;
+}
+
+export interface ParticipantAudioLatencyStatus {
+  requested: AudioLatencyProfileValue;
+  effectiveMode: EffectiveAudioLatencyMode;
+  quantumUs: AudioQuantumUs;
+}
+
 export interface ProviderHealth {
   healthy?: boolean;
   provider?: string;

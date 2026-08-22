@@ -45,6 +45,16 @@ import {
   maybeStartQualification,
   restoreQualificationRoute,
 } from "./media-room-topology.ts";
+import {
+  applyMediaPolicyUpdate,
+  normalizeMediaPolicySnapshot,
+} from "./media-room-policy.ts";
+import {
+  compatibilityAudioLatencyCapabilities,
+  computeEffectiveAudioLatencyMode,
+  effectiveAudioQuantumUs,
+  normalizeAudioLatencyCapabilities,
+} from "./audio-latency-capabilities.ts";
 import { mediaDebug } from "./debug.ts";
 import type {
   DurableObjectState,
@@ -53,7 +63,9 @@ import type {
 import type {
   DynamicRecord,
   MediaControlEnv,
+  MediaPolicySnapshot,
   OperationResult,
+  ParticipantAudioLatencyStatus,
   RoomParticipant,
   RoomProviderConfig,
   RoomProviderHealth,
@@ -122,6 +134,7 @@ export class MediaRoomDO {
   operationResultsTTL: number;
   leavePending: Set<string>;
   participantConnectionEpochs: Map<string, number>;
+  mediaPolicy: MediaPolicySnapshot | null;
 
   constructor(state: DurableObjectState, env: MediaControlEnv) {
     this.state = state;
@@ -157,6 +170,7 @@ export class MediaRoomDO {
     this.operationResultsTTL = 5 * 60 * 1000;
     this.leavePending = new Set();
     this.participantConnectionEpochs = new Map();
+    this.mediaPolicy = null;
     this.state.blockConcurrencyWhile?.(() => this.loadDurableState());
   }
 
@@ -182,6 +196,21 @@ export class MediaRoomDO {
       return new Response("Unauthorized", { status: 401 });
     if (url.pathname.endsWith("/participants") && request.method === "GET")
       return Response.json({ participants: this.getParticipantList() });
+    if (url.pathname.endsWith("/media-policy") && request.method === "POST") {
+      const parsed: unknown = await request.json();
+      const result = applyMediaPolicyUpdate(this, parsed);
+      if (!result.accepted)
+        return Response.json(
+          { error: "Media policy update rejected", reason: result.reason },
+          { status: result.reason === "invalid-policy" ? 400 : 409 },
+        );
+      return Response.json({
+        accepted: true,
+        changed: result.changed,
+        mediaPolicy: result.policy,
+        roomRevision: this.roomRevision.toString(),
+      });
+    }
     if (url.pathname.endsWith("/moderate") && request.method === "POST") {
       const parsed: unknown = await request.json();
       const data: DynamicRecord = isRecord(parsed) ? parsed : {};
@@ -405,6 +434,7 @@ export class MediaRoomDO {
       qualificationParticipantSignature,
       participantConnectionEpochs,
       operationResults,
+      mediaPolicy,
     ] = await Promise.all([
       this.state.storage.get("route"),
       this.state.storage.get("epoch"),
@@ -422,6 +452,7 @@ export class MediaRoomDO {
       this.state.storage.get("qualificationParticipantSignature"),
       this.state.storage.get("participantConnectionEpochs"),
       this.state.storage.get("operationResults"),
+      this.state.storage.get("mediaPolicy"),
     ]);
     if (isRoomRoute(route)) this.route = route;
     if (typeof epoch === "number" && Number.isSafeInteger(epoch))
@@ -493,6 +524,10 @@ export class MediaRoomDO {
       );
       this.cleanupOperationResults();
     }
+    if (isRecord(mediaPolicy)) {
+      const snapshot = normalizeMediaPolicySnapshot(mediaPolicy);
+      if (snapshot) this.mediaPolicy = snapshot;
+    }
     const hasPersistedRoomState = Boolean(
       route ||
       (typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch > 0) ||
@@ -515,8 +550,6 @@ export class MediaRoomDO {
   async resetDormantRoomState() {
     this.sourceRevision++;
     this.roomRevision++;
-    // Publication-set invariant: any publishedSources clear also advances and
-    // persists publicationRevision so a reconstructed DO never rolls back.
     this.publicationRevision++;
     this.epoch = Math.max(this.epoch, Number(this.route.epoch) || 0) + 1;
     this.route = createLocalRoute(
@@ -641,6 +674,9 @@ export class MediaRoomDO {
           mediaCapabilities: restored.mediaCapabilities || null,
           capabilityProtocol:
             restored.capabilityProtocol || "video-codec-matrix-v1",
+          audioLatencyCapabilities:
+            restored.audioLatencyCapabilities ||
+            compatibilityAudioLatencyCapabilities(),
           muted: restored.muted !== false,
           deafened: restored.deafened === true,
           joinedAt: restored.joinedAt || Date.now(),
@@ -861,10 +897,6 @@ export class MediaRoomDO {
     return retired;
   }
 
-  // Single entry point for the publication-revision domain. Callers mutate
-  // publishedSources first, then commit the mutation here: revision bump,
-  // durable persistence (publishedSources + publicationRevision + roomRevision
-  // as one logical commit), and receiver pushes carrying the new revision.
   commitPublicationMutation({
     removed = [],
     upserted = [],
@@ -1121,6 +1153,7 @@ export class MediaRoomDO {
         capabilityProtocol:
           participant.capabilityProtocol || "video-codec-matrix-v1",
         connectionEpoch: participant.connectionEpoch || 1,
+        audioLatency: this.participantAudioLatencyStatus(participant),
         status: inGrace
           ? "grace"
           : participant.status === "disconnected"
@@ -1129,6 +1162,21 @@ export class MediaRoomDO {
         lastSeenAt: participant.lastSeenAt || null,
       };
     });
+  }
+
+  participantAudioLatencyStatus(
+    participant: RoomParticipant,
+  ): ParticipantAudioLatencyStatus {
+    const requested = this.mediaPolicy?.audioLatencyProfile ?? "standard";
+    const quantumUs = effectiveAudioQuantumUs(
+      participant.audioLatencyCapabilities ||
+        compatibilityAudioLatencyCapabilities(),
+    );
+    return {
+      requested,
+      effectiveMode: computeEffectiveAudioLatencyMode(requested, quantumUs),
+      quantumUs,
+    };
   }
 
   buildTopologySnapshot() {
@@ -1165,6 +1213,8 @@ export class MediaRoomDO {
           p.sourceStates || {},
         ]),
       ),
+      mediaPolicy: this.mediaPolicy,
+      audioLatencyProfile: this.mediaPolicy?.audioLatencyProfile ?? "standard",
     };
   }
 

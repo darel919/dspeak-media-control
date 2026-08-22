@@ -150,6 +150,8 @@ export const P2P_PARTICIPANT_LIMITS = {
   autoVideo: 4,
 } as const;
 
+export const ULTRA_LOW_MESH_BUDGET = 4;
+
 export type ConnectionMode = "auto" | "direct";
 export type MediaRouteKind =
   (typeof MEDIA_ROUTE_KIND)[keyof typeof MEDIA_ROUTE_KIND];
@@ -195,7 +197,10 @@ export function getMediaChannelParticipantLimit(
 export function getP2PQualificationLimit(
   connectionMode: string,
   hasVideo: boolean,
+  audioLatencyProfile: string = "standard",
 ): number {
+  if (audioLatencyProfile === "ultra-low" && !hasVideo)
+    return Math.min(ULTRA_LOW_MESH_BUDGET, P2P_PARTICIPANT_LIMITS.autoAudio);
   return connectionMode === "direct"
     ? hasVideo
       ? P2P_PARTICIPANT_LIMITS.directVideo
@@ -210,13 +215,19 @@ export function checkP2PEligibility({
   participantCount,
   hasVideo,
   requiredSources = [],
+  audioLatencyProfile = "standard",
 }: {
   connectionMode: string;
   participantCount: number;
   hasVideo: boolean;
   requiredSources?: readonly string[];
+  audioLatencyProfile?: string;
 }): { eligible: true } | { eligible: false; reason: string } {
-  const limit = getP2PQualificationLimit(connectionMode, hasVideo);
+  const limit = getP2PQualificationLimit(
+    connectionMode,
+    hasVideo,
+    audioLatencyProfile,
+  );
   if (participantCount > limit)
     return {
       eligible: false,
