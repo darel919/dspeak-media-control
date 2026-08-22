@@ -6,6 +6,7 @@ import {
   checkP2PEligibility,
   createP2PRoute,
   createSFURoute,
+  qualificationUsesRelay,
 } from "./protocol.ts";
 import { qoeWouldImprove, rankQoeCandidates } from "./qoe.ts";
 import { mediaDebug } from "./debug.ts";
@@ -118,7 +119,8 @@ export function maybeStartQualification(room: DynamicRecord) {
     return;
   if (
     room.route.kind === MEDIA_ROUTE_KIND.P2P &&
-    room.route.reason === "qualified-direct-mesh" &&
+    (room.route.reason === "qualified-direct-mesh" ||
+      room.route.reason === "qualified-relay-mesh") &&
     room.qualifiedParticipantSignature === room.getParticipantSignature()
   )
     return;
@@ -172,7 +174,10 @@ export function maybeStartQualification(room: DynamicRecord) {
     participants: room.participants.size,
   });
   for (const participant of room.participants.values())
-    room.sendTopology(participant.ws, { action: "qualify-p2p" });
+    room.sendTopology(participant.ws, {
+      action: "qualify-p2p",
+      relayAllowed: connectionMode === "auto",
+    });
 }
 
 export function checkQualificationComplete(room: DynamicRecord) {
@@ -235,20 +240,30 @@ export function checkQualificationComplete(room: DynamicRecord) {
     getQoeCandidates(room),
     objective,
   ).find((candidate) => candidate.provider === activeProvider);
-  if (
-    activeCandidate &&
-    (!p2pCandidate.paths.every((path: DynamicRecord) => path.rttMs != null) ||
-      !qoeWouldImprove(activeCandidate, p2pCandidate, Date.now(), objective))
-  ) {
-    void room.state.storage.setAlarm?.(Date.now() + 1_000);
-    return;
+  if (activeProvider && activeCandidate?.failed !== true) {
+    const p2pMeasurementsUsable = p2pCandidate.paths.every(
+      (path: DynamicRecord) => path.rttMs != null,
+    );
+    const sfuMeasurementUsable =
+      activeCandidate == null ||
+      Number.isFinite(activeCandidate.worstLatencyMs);
+    if (!p2pMeasurementsUsable || !sfuMeasurementUsable) {
+      void room.state.storage.setAlarm?.(Date.now() + 1_000);
+      return;
+    }
+    if (!qoeWouldImprove(activeCandidate, p2pCandidate, Date.now(), objective))
+      return;
   }
   room.commitRoute(
     createP2PRoute(
-      P2P_PATH.DIRECT,
+      qualificationUsesRelay(candidateReports)
+        ? P2P_PATH.RELAY
+        : P2P_PATH.DIRECT,
       room.epoch,
       room.sourceRevision,
-      "qualified-direct-mesh",
+      qualificationUsesRelay(candidateReports)
+        ? "qualified-relay-mesh"
+        : "qualified-direct-mesh",
     ),
   );
 }
@@ -312,9 +327,11 @@ export function commitRoute(room: DynamicRecord, route: RoomRoute) {
           )
         : 10000,
     p2pEligible: route.kind === MEDIA_ROUTE_KIND.P2P,
+    p2pPath: route.kind === MEDIA_ROUTE_KIND.P2P ? route.path : null,
     p2pQualificationResult:
       route.kind === MEDIA_ROUTE_KIND.P2P
-        ? route.reason === "qualified-direct-mesh"
+        ? route.reason === "qualified-direct-mesh" ||
+          route.reason === "qualified-relay-mesh"
           ? "qualified"
           : route.reason === "qualifying-direct"
             ? "qualifying"

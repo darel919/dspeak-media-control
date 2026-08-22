@@ -50,6 +50,13 @@ provider tickets, and `media-qoe` aggregation. QoE selection uses worst-path
 media quality rather than RTT alone, while family-only reports remain supported
 for older clients.
 
+In Auto mode the room can commit `P2P/RELAY`: a TURN-relayed ICE pair is a P2P
+path class, not a separate topology. Qualification reports carry
+`localCandidateType`/`remoteCandidateType`; the server derives `path` from that
+evidence and races the measured P2P candidate against the active SFU QoE before
+committing. Direct mode stays direct-only (`P2P_PATH.DIRECT`, STUN-less TURN
+never issued). See "P2P Path Selection" in `docs/protocol.md`.
+
 ## Development
 
 ```bash

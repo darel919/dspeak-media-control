@@ -315,7 +315,7 @@ export async function handleRoomMessage(
       if (
         Number(data.epoch) !== room.epoch ||
         room.route.kind !== "p2p" ||
-        room.route.path !== "direct" ||
+        (room.route.path !== "direct" && room.route.path !== "relay") ||
         room.route.reason !== "qualifying-direct"
       )
         break;
@@ -698,10 +698,12 @@ export async function handleRoomMessage(
       if (
         Number(data.epoch) !== room.epoch ||
         room.route.kind !== "p2p" ||
-        room.route.path !== "direct" ||
-        !["qualifying-direct", "qualified-direct-mesh"].includes(
-          room.route.reason,
-        )
+        (room.route.path !== "direct" && room.route.path !== "relay") ||
+        ![
+          "qualifying-direct",
+          "qualified-direct-mesh",
+          "qualified-relay-mesh",
+        ].includes(room.route.reason)
       )
         break;
       room.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.P2P_FAILED, {

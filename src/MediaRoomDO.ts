@@ -746,6 +746,10 @@ export class MediaRoomDO {
     this.sendMessage(ws, MEDIA_CONTROL_MESSAGE_TYPES.TOPOLOGY_STATE, {
       route: this.route,
       mode,
+      p2pPath:
+        this.route.kind === MEDIA_ROUTE_KIND.P2P && !pending
+          ? this.route.path
+          : undefined,
       epoch: pending?.epoch || this.epoch,
       preparedEpoch: pending?.epoch || this.epoch,
       provider:
@@ -795,7 +799,7 @@ export class MediaRoomDO {
       !Number.isSafeInteger(epoch) ||
       epoch !== this.epoch ||
       this.route.kind !== MEDIA_ROUTE_KIND.P2P ||
-      this.route.path !== "direct" ||
+      (this.route.path !== "direct" && this.route.path !== "relay") ||
       !targetPeerId ||
       !data.signal ||
       typeof data.signal !== "object"
@@ -1193,6 +1197,8 @@ export class MediaRoomDO {
               ? "probing"
               : "p2p"
             : "sfu",
+      p2pPath:
+        this.route.kind === MEDIA_ROUTE_KIND.P2P ? this.route.path : undefined,
       epoch: String(pending?.epoch || this.epoch),
       sourceRevision: String(this.sourceRevision),
       roomRevision: this.roomRevision.toString(),

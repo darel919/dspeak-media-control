@@ -365,7 +365,10 @@ export async function handleP2PFailure(
   session: DynamicRecord,
   reason: string,
 ) {
-  if (room.route.kind !== MEDIA_ROUTE_KIND.P2P || room.route.path !== "direct")
+  if (
+    room.route.kind !== MEDIA_ROUTE_KIND.P2P ||
+    (room.route.path !== "direct" && room.route.path !== "relay")
+  )
     return;
   const participant = room.participants.get(
     `${session.userId}:${session.deviceId}`,

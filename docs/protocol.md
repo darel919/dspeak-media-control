@@ -26,6 +26,32 @@ This document specifies the media transport protocol (version 919, contract revi
 | `request-snapshot`        | Request full room snapshot              |
 | `cloudflare-publication`  | Cloudflare Realtime publication updates |
 
+## P2P Path Selection (direct vs TURN relay)
+
+The control plane owns the P2P path decision. A TURN-relayed ICE pair is a
+first-class Auto-mode route, never a topology of its own.
+
+- `topology-state` carries `relayAllowed` while the room is qualifying
+  (`mode: "probing"`). It is `true` only when the room connection mode is
+  `auto`. Direct-mode rooms never receive TURN servers.
+- The client qualifies P2P with the full normalized ICE server set when
+  `relayAllowed`, and reports each selected edge in `p2p-ready`
+  `candidateReports`: `{ peerId, path, localCandidateType,
+remoteCandidateType, rttMs, protocol }`. The server derives `path` from the
+  candidate types (`localCandidateType === "relay" ||
+remoteCandidateType === "relay"` implies `relay`), so a client-asserted
+  `path` alone cannot flip the route.
+- Once every required edge has qualified, the room commits
+  `P2P/DIRECT` (`qualified-direct-mesh`) or `P2P/RELAY`
+  (`qualified-relay-mesh`) based on that evidence. A committed P2P route is
+  compared against measured active-SFU QoE first; the SFU fallback stays live
+  during qualification.
+- `topology-state` carries `p2pPath` ("direct" or "relay") for committed P2P
+  routes so diagnostics can distinguish `Direct (P2P)` / `Mesh (P2P)` from
+  `P2P via TURN` / `Mesh (TURN-assisted)`.
+- Relay usage does not downgrade the Ultra-Low audio profile and does not by
+  itself trigger the latency warning badge; both follow measured network QoE.
+
 ### Server → Client
 
 | Type                               | Purpose                                                     |

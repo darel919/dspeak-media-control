@@ -289,6 +289,26 @@ export function validateRouteForMode(
   return { valid: true };
 }
 
+export function qualificationUsesRelay(
+  candidateReports: Array<Record<string, unknown>> | null | undefined,
+): boolean {
+  const reports = Array.isArray(candidateReports) ? candidateReports : [];
+  for (const report of reports) {
+    if (!report || typeof report !== "object") continue;
+    if (report.path === P2P_PATH.RELAY) return true;
+    const localType =
+      typeof report.localCandidateType === "string"
+        ? report.localCandidateType
+        : null;
+    const remoteType =
+      typeof report.remoteCandidateType === "string"
+        ? report.remoteCandidateType
+        : null;
+    if (localType === "relay" || remoteType === "relay") return true;
+  }
+  return false;
+}
+
 export function compareRouteEpoch(
   a: Pick<MediaRoute, "epoch" | "sourceRevision">,
   b: Pick<MediaRoute, "epoch" | "sourceRevision">,
